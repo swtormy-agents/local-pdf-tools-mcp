@@ -1,0 +1,35 @@
+{
+  "name": "local-pdf-tools-mcp",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Local stdio MCP server for PDF merge, split, page organize and images to PDF on your own machine. No network, no telemetry.",
+  "type": "module",
+  "main": "dist/server.js",
+  "bin": {
+    "local-pdf-tools-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && vitest run",
+    "fixtures": "node test/fixtures/generate.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "author": "swtormy-agents",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}
