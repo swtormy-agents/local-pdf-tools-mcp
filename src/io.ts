@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { UserError } from "./errors.js";
-import type { Limits } from "./limits.js";
+import { LIMITS, type Limits } from "./limits.js";
 import type { PathGuard } from "./pathGuard.js";
 
 const MB = 1024 * 1024;
@@ -14,12 +14,12 @@ export interface LoadedFile {
 export type InputKind = "pdf" | "image";
 
 /** Count/size checks that need no file access (also used by tests). */
-export function checkCounts(n: number, limits: Limits): void {
+export function checkCounts(n: number, limits: Limits = LIMITS): void {
   if (n === 0) throw new UserError("No input files given.", "NO_INPUT");
   if (n > limits.maxFiles) throw new UserError(`Too many input files (${n}): max ${limits.maxFiles} per call.`, "TOO_MANY_FILES");
 }
 
-export function checkSizes(sizes: number[], limits: Limits, names: string[] = []): void {
+export function checkSizes(sizes: number[], limits: Limits = LIMITS, names: string[] = []): void {
   let total = 0;
   sizes.forEach((s, i) => {
     if (s > limits.maxFileBytes) {
@@ -32,7 +32,7 @@ export function checkSizes(sizes: number[], limits: Limits, names: string[] = []
   }
 }
 
-/** Cheap signature check so obviously wrong files fail fast with a clear message. */
+/** Cheap signature check so obviously wrong files fail fast with a clear message (the core does the real header checks). */
 export function sniff(bytes: Uint8Array, kind: InputKind, name: string): "pdf" | "jpeg" | "png" {
   const b = bytes;
   if (kind === "pdf") {
@@ -43,14 +43,15 @@ export function sniff(bytes: Uint8Array, kind: InputKind, name: string): "pdf" |
   }
   if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "jpeg";
   if (b.length >= 8 && Buffer.from(b.subarray(0, 8)).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "png";
-  throw new UserError(`${name} is not a JPEG or PNG image.`, "IMAGE_INVALID");
+  throw new UserError(`${name} is not a JPEG or PNG image. Only JPEG and PNG are supported; convert it first.`, "UNSUPPORTED_IMAGE");
 }
 
 /**
- * Resolve, size-check and read inputs. Sizes are checked from fstat of the opened handle before reading,
+ * Resolve, size-check and read inputs. This is the MCP-side pre-check with the core's LIMITS values
+ * (the core enforces its limits again; `limits` is a parameter only so tests can use small values). Sizes are checked from fstat of the opened handle before reading,
  * and reads never exceed the per-file limit, so a file growing during the read cannot blow memory.
  */
-export async function readInputs(guard: PathGuard, inputs: string[], limits: Limits, kind: InputKind): Promise<LoadedFile[]> {
+export async function readInputs(guard: PathGuard, inputs: string[], kind: InputKind, limits: Limits = LIMITS): Promise<LoadedFile[]> {
   checkCounts(inputs.length, limits);
   const resolved = await Promise.all(inputs.map((p) => guard.resolveInputFile(p)));
   const out: LoadedFile[] = [];

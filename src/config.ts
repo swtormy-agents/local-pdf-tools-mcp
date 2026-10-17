@@ -3,11 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { UserError } from "./errors.js";
 
-import { DEFAULT_LIMITS, type Limits } from "./limits.js";
-
 export interface Config {
   allowedRoot: string;
-  limits: Limits;
 }
 
 const BOOLEAN_FLAGS = new Set<string>([]);
@@ -60,7 +57,7 @@ export function assertSafeRoot(root: string, homes: string[] = [os.homedir(), pr
 /**
  * Configuration comes from CLI flags (preferred) or environment variables.
  *   --root <dir>            / LOCAL_PDF_TOOLS_ROOT            (REQUIRED, no default)
- * Limits are shared constants (see limits.ts) and match the website; they are not configurable.
+ * Limits are owned by the core module (LIMITS, see limits.ts) and match the website; they are not configurable.
  */
 export function loadConfig(argv: string[] = process.argv.slice(2), env: NodeJS.ProcessEnv = process.env, cwd = process.cwd(), homes?: string[]): Config {
   const flags: Record<string, string> = {};
@@ -88,5 +85,5 @@ export function loadConfig(argv: string[] = process.argv.slice(2), env: NodeJS.P
   }
   const allowedRoot = path.resolve(cwd, root);
   assertSafeRoot(allowedRoot, homes ?? [os.homedir(), env.HOME ?? "", env.USERPROFILE ?? ""]);
-  return { allowedRoot, limits: DEFAULT_LIMITS };
+  return { allowedRoot };
 }

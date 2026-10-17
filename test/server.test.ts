@@ -5,14 +5,13 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config";
 import { CoreError, type PdfCore } from "../src/core/types";
-import { DEFAULT_LIMITS } from "../src/limits";
 import { createServer } from "../src/server";
 import { FIXTURES, tmpRoot } from "./helpers";
 
 async function connect(core?: PdfCore) {
   const root = await tmpRoot();
   await fs.copyFile(path.join(FIXTURES, "three-pages.pdf"), path.join(root, "a.pdf"));
-  const server = await createServer({ allowedRoot: root, limits: DEFAULT_LIMITS }, core);
+  const server = await createServer({ allowedRoot: root }, core);
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await server.connect(st);
   const client = new Client({ name: "test", version: "0" });
@@ -41,7 +40,10 @@ describe("server", () => {
     const fake: PdfCore = {
       info: async () => ({ pageCount: 3, pages: [], encrypted: false }),
       merge: async (pdfs) => pdfs[0],
-      split: async (pdf) => [pdf, pdf],
+      split: async (pdf) => [
+        { pages: [1, 2], bytes: pdf },
+        { pages: [3], bytes: pdf },
+      ],
       organize: async (pdf) => pdf,
       imagesToPdf: async () => new Uint8Array(),
     };
@@ -50,9 +52,38 @@ describe("server", () => {
     expect(r.isError).toBeFalsy();
     expect(r.structuredContent.output).toBe(path.join(root, "out", "merged.pdf"));
     const s: any = await client.callTool({ name: "pdf_split", arguments: { input: "a.pdf", mode: "every_n", n: 2, outputDir: "out" } });
-    expect(s.structuredContent.outputs).toHaveLength(2);
+    expect(s.structuredContent.outputs).toEqual([path.join(root, "out", "a-p1-2.pdf"), path.join(root, "out", "a-p3.pdf")]);
+    expect(s.structuredContent.files[1].pages).toEqual([3]);
     const again: any = await client.callTool({ name: "pdf_merge", arguments: { inputs: ["a.pdf", "a.pdf"], outputDir: "out" } });
     expect(again.structuredContent.output).toBe(path.join(root, "out", "merged-1.pdf"));
+  });
+  it("pdf_organize passes 0-based ORIGINAL indices and no limits to the core", async () => {
+    const calls: unknown[][] = [];
+    const fake = {
+      info: async (...args: unknown[]) => {
+        calls.push(["info", ...args.slice(1)]);
+        return { pageCount: 3, pages: [], encrypted: false };
+      },
+      organize: async (pdf: Uint8Array, ...rest: unknown[]) => {
+        calls.push(["organize", ...rest]);
+        return pdf;
+      },
+    } as unknown as PdfCore;
+    const { client, root } = await connect(fake);
+    const r: any = await client.callTool({
+      name: "pdf_organize",
+      arguments: { input: "a.pdf", order: [3, 1], rotate: [{ page: 3, degrees: 90 }], outputDir: "out" },
+    });
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent.output).toBe(path.join(root, "out", "a-organized.pdf"));
+    expect(calls).toEqual([["organize", { order: [2, 0], rotate: { 2: 90 } }]]);
+    calls.length = 0;
+    await client.callTool({ name: "pdf_organize", arguments: { input: "a.pdf", delete: [2], outputDir: "out" } });
+    expect(calls).toEqual([["info"], ["organize", { order: [0, 2] }]]);
+    const both: any = await client.callTool({ name: "pdf_organize", arguments: { input: "a.pdf", order: [1], delete: [2], outputDir: "out" } });
+    expect(text(both)).toMatch(/BAD_ARGS/);
+    const bad: any = await client.callTool({ name: "pdf_organize", arguments: { input: "a.pdf", delete: [9], outputDir: "out" } });
+    expect(text(bad)).toMatch(/PAGE_RANGE/);
   });
   it("maps core errors (encrypted) and refuses paths outside the root", async () => {
     const enc: PdfCore = {
@@ -79,6 +110,6 @@ describe("config", () => {
     expect(() => loadConfig(["--root", home], {}, home, H)).toThrow(expect.objectContaining({ code: "ROOT_TOO_BROAD" }));
     expect(() => loadConfig(["--root", "~/docs"], {}, home, H)).toThrow(expect.objectContaining({ code: "ROOT_TILDE" }));
     expect(loadConfig([], { LOCAL_PDF_TOOLS_ROOT: path.resolve("/srv/pdf") }, home, H).allowedRoot).toBe(path.resolve("/srv/pdf"));
-    expect(loadConfig(["--root", "/srv/pdf"], {}, home, H).limits).toBe(DEFAULT_LIMITS);
+    expect(loadConfig(["--root", "/srv/pdf"], {}, home, H)).toEqual({ allowedRoot: path.resolve("/srv/pdf") });
   });
 });

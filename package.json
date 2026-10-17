@@ -16,7 +16,8 @@
   "scripts": {
     "build": "tsc",
     "test": "npm run build && vitest run",
-    "fixtures": "node test/fixtures/generate.mjs"
+    "fixtures": "node test/fixtures/generate.mjs",
+    "typecheck": "tsc --noEmit"
   },
   "engines": {
     "node": ">=20"

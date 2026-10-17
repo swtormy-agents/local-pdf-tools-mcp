@@ -26,14 +26,32 @@ export const pdfSplitSchema = {
   outputDir: path.describe("Directory for the results, relative to the allowed root."),
 };
 
+/** A clockwise rotation for one page. Degrees are a multiple of 90 and are added to the page's current rotation. */
+const rotation = z.object({
+  page: pageNo.describe("1-based page number of the ORIGINAL document."),
+  degrees: z.number().int().multipleOf(90).describe("Clockwise degrees, a multiple of 90 (e.g. 90, 180, 270, -90)."),
+});
+
 export const pdfOrganizeSchema = {
   input: path.describe("PDF path relative to the allowed root."),
-  order: z.array(pageNo).min(1).optional().describe("New page order as 1-based input page numbers, e.g. [3,1,2]."),
-  rotate: z
-    .record(z.string().regex(/^[1-9][0-9]*$/), z.union([z.literal(90), z.literal(180), z.literal(270)]))
+  order: z
+    .array(pageNo)
+    .min(1)
     .optional()
-    .describe('Clockwise rotation per page, e.g. {"2":90}.'),
-  delete: z.array(pageNo).min(1).optional().describe("1-based page numbers to remove."),
+    .describe(
+      "Final page sequence as 1-based page numbers of the ORIGINAL document, e.g. [3,1,2]. Pages not listed are removed. " +
+        "May be omitted only together with delete and/or rotate: then all pages are kept in original order (minus delete).",
+    ),
+  rotate: z
+    .array(rotation)
+    .min(1)
+    .optional()
+    .describe('Rotations by ORIGINAL 1-based page number, e.g. [{"page":2,"degrees":90}]. Added to the current rotation.'),
+  delete: z
+    .array(pageNo)
+    .min(1)
+    .optional()
+    .describe("Convenience: 1-based page numbers to remove, keeping the rest in original order. Cannot be combined with order (just leave those pages out of order)."),
   outputDir: path.describe("Directory for the result, relative to the allowed root."),
   outputName: z.string().optional().describe("File name without path (default: <input>-organized)."),
 };
@@ -54,6 +72,15 @@ export function splitArgsError(a: { mode: string; ranges?: unknown[]; n?: number
   return null;
 }
 
-export function organizeArgsError(a: { order?: unknown; rotate?: unknown; delete?: unknown }): string | null {
-  return a.order || a.rotate || a.delete ? null : "Give at least one of order, rotate or delete.";
+export function organizeArgsError(a: { order?: unknown[]; rotate?: { page: number }[]; delete?: unknown[] }): string | null {
+  if (a.order && a.delete) return "Use either order (the final page sequence; pages not listed are removed) or delete, not both.";
+  if (!a.order && !a.rotate && !a.delete) return "Give order (final page sequence), and/or rotate, or delete.";
+  if (a.rotate) {
+    const seen = new Set<number>();
+    for (const r of a.rotate) {
+      if (seen.has(r.page)) return `Page ${r.page} appears more than once in rotate; give one total rotation per page.`;
+      seen.add(r.page);
+    }
+  }
+  return null;
 }
