@@ -39,7 +39,7 @@ describe("bundle", () => {
     const { sections } = await import("../scripts/notices.mjs");
     const covered = (sections as { package: string }[]).map((s) => s.package).sort();
     expect(covered).toEqual(bundledPackages());
-    const notices = read("THIRD_PARTY_NOTICES");
+    const notices = read("THIRD_PARTY_NOTICES").replace(/\r\n/g, "\n"); // tolerate a CRLF checkout
     for (const needle of [
       "Copyright (c) 2026 swtormy-agents", // pdf-tools
       "Copyright (c) 2019 Andrew Dillon", // pdf-lib

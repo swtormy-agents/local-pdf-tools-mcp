@@ -1,0 +1,3 @@
+# Generated / verbatim license texts: keep LF on every OS (Windows checkouts would otherwise get CRLF).
+THIRD_PARTY_NOTICES text eol=lf
+scripts/licenses/* text eol=lf
