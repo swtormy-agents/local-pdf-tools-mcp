@@ -50,14 +50,14 @@ export function sniffPdf(bytes: Uint8Array, name: string): void {
  */
 export async function readInputs(guard: PathGuard, inputs: string[], kind: InputKind, limits: Limits = LIMITS): Promise<LoadedFile[]> {
   checkCounts(inputs.length, limits);
-  const resolved = await Promise.all(inputs.map((p) => guard.resolveInputFile(p)));
   const out: LoadedFile[] = [];
   let total = 0;
-  for (const [i, p] of resolved.entries()) {
-    const fh = await fs.open(p, "r");
+  for (const [i, name] of inputs.entries()) {
+    // Opened and identity-checked by the guard (no realpath-then-open race); read through the handle only.
+    const { real: p, fh } = await guard.openInputFile(name);
     try {
       const { size } = await fh.stat();
-      checkSizes([size], limits, [inputs[i]]);
+      checkSizes([size], limits, [name]);
       total += size;
       checkSizes([total], { ...limits, MAX_FILE_BYTES: Infinity });
       const buf = Buffer.alloc(size);
@@ -68,7 +68,7 @@ export async function readInputs(guard: PathGuard, inputs: string[], kind: Input
         off += bytesRead;
       }
       const bytes = new Uint8Array(buf.buffer, buf.byteOffset, off);
-      if (kind === "pdf") sniffPdf(bytes, inputs[i]);
+      if (kind === "pdf") sniffPdf(bytes, name);
       out.push({ path: p, bytes });
     } finally {
       await fh.close();

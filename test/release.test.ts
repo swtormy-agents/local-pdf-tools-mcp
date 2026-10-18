@@ -65,19 +65,23 @@ describe("bundle", () => {
 
 describe("notices vs. the core's THIRD-PARTY.md", () => {
   const notices = () => read("THIRD_PARTY_NOTICES").replace(/\r\n/g, "\n");
-  const squash = (t: string) => t.replace(/\s+/g, " ").trim();
-  it("contains every verbatim block of the core's THIRD-PARTY.md (comment markers aside)", () => {
+  it("contains each of the 14 verbatim blocks of the core's THIRD-PARTY.md, byte for byte (CRLF->LF only)", () => {
     const md = read("node_modules/@local-pdf-tools/core/THIRD-PARTY.md").replace(/\r\n/g, "\n");
-    const blocks = [...md.matchAll(/```\w*\n([\s\S]*?)\n```/g)].map((m) => m[1]).filter((b) => !/^\s*(npm|node|import)\b/.test(b));
-    expect(blocks.length).toBeGreaterThanOrEqual(10);
-    const all = squash(notices());
+    const blocks = [...md.matchAll(/^```\n([\s\S]*?)\n```$/gm)].map((m) => m[1]);
+    expect(blocks).toHaveLength(14);
+    const all = notices();
     for (const b of blocks) {
-      const text = b
-        .split("\n")
-        .filter((l) => !/^\s*(\/\*|\*\/|\*)\s*$/.test(l))
-        .map((l) => l.replace(/^\s?(\*|\/\/) ?/, ""))
-        .join("\n");
-      expect(all, b.slice(0, 80)).toContain(squash(text));
+      // Source-header blocks (/* ... */ or // lines) are quoted in NOTICES without the comment markers; the text
+      // itself must still match exactly, line by line. Everything else must appear unchanged.
+      const isComment = /^(\/\*|\/\/)/.test(b);
+      const text = isComment
+        ? b
+            .split("\n")
+            .filter((l) => !/^\s*(\/\*|\*\/)\s*$/.test(l))
+            .map((l) => l.replace(/^ \*( |$)/, "").replace(/^\/\/ ?/, ""))
+            .join("\n")
+        : b;
+      expect(all.includes(text), `missing verbatim: ${text.slice(0, 80)}`).toBe(true);
     }
   });
   it("pdfkit and Christopher Brown sections use their own verbatim license texts (no generic MIT under another line)", () => {

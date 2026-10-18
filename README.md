@@ -6,6 +6,7 @@ Status: pre-release. All five tools run on the shared core `@local-pdf-tools/cor
 
 ## Rules
 - `--root <dir>` (or `LOCAL_PDF_TOOLS_ROOT`) is required. A filesystem root, your home directory, folders that contain it, and paths with an unexpanded `~` are refused. All paths must stay inside the root (symlinks are resolved).
+- Inputs are opened race-free: the path is checked with realpath, opened with `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`, and the open handle must be a regular file with the same device/inode as the checked path, which must still resolve inside the root after the open (on Linux the handle's own path is checked too). The file is read through that handle only. Hard links (more than one name for the file, `nlink > 1`) are refused, because they can point at files outside the root. Windows has no `O_NOFOLLOW`: the open itself may follow a link swapped in at the last moment, but the post-open identity check rejects it, so nothing outside the root is read.
 - Outputs are new files only (`name.pdf`, `name-1.pdf`, ...). Nothing is overwritten or deleted, including on error paths.
 - Encrypted PDFs are refused (`PDF_ENCRYPTED`) and never decrypted.
 - Every output is a new, clean document: no Info dictionary or XMP metadata, no JavaScript, OpenAction, attachments or form fields; only http/https/mailto link annotations survive. JPEG EXIF (incl. GPS), IPTC and comments are stripped from images.

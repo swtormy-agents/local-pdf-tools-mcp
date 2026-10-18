@@ -42,7 +42,6 @@ function blockHeaders(file) {
 }
 
 const coreThirdParty = () => read(nm("@local-pdf-tools/core/THIRD-PARTY.md"));
-const squash = (t) => t.replace(/\s+/g, " ").trim();
 
 /** A file from scripts/licenses/, vendored verbatim from upstream (the source URL is given in the section). */
 const vendored = (name) => read(path.join(root, "scripts/licenses", name));
@@ -60,13 +59,13 @@ function pdfkitLicense() {
   return text;
 }
 
-/** The Apache-2.0 text, checked (whitespace-insensitive) against the full text in the core's THIRD-PARTY.md. */
+/** The Apache-2.0 text, checked byte for byte (CRLF->LF only) against the full text in the core's THIRD-PARTY.md. */
 function apacheLicense() {
   const text = vendored("Apache-2.0.txt");
   const md = coreThirdParty();
   const sec = md.slice(md.indexOf("## Apache License 2.0"));
   const m = /```\n([\s\S]*?)\n```/.exec(sec);
-  if (!m || squash(m[1]) !== squash(text)) throw new Error("Apache-2.0 text differs from the core's THIRD-PARTY.md");
+  if (!m || m[1].replace(/^\n+/, "").trimEnd() !== text.replace(/^\n+/, "")) throw new Error("Apache-2.0 text differs from the core's THIRD-PARTY.md");
   return text;
 }
 

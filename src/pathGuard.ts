@@ -54,7 +54,19 @@ export const testHooks: {
   afterOpen?: (dir: string) => Promise<void> | void;
   /** Called after a failed write, after truncation and before the file is located for the error message. */
   beforeCleanup?: (dir: string) => Promise<void> | void;
+  /** Input side: called after the realpath/stat check, immediately before the input file is opened. */
+  beforeInputOpen?: (real: string) => Promise<void> | void;
+  /** Input side: called right after the input file was opened, before the post-open checks. */
+  afterInputOpen?: (real: string) => Promise<void> | void;
 } = {};
+
+/** Flags for opening an input: no symlink at the last component, and never block on a FIFO/device swapped in. */
+const INPUT_FLAGS = C.O_RDONLY | (C.O_NOFOLLOW ?? 0) | (C.O_NONBLOCK ?? 0);
+
+/** Exact identity of a file (bigint stats: Windows file indexes do not fit a double). */
+const sameFile = (a: { dev: bigint; ino: bigint }, b: { dev: bigint; ino: bigint }) => a.dev === b.dev && a.ino === b.ino;
+
+const errnoOf = (e: unknown) => (e as NodeJS.ErrnoException | null)?.code;
 
 /**
  * Restricts all file access to one allowed root directory.
@@ -102,19 +114,93 @@ export class PathGuard {
     return real;
   }
 
-  /** Resolve an existing regular file for reading. */
+  private notFound(p: string, abs: string): UserError {
+    return new UserError(`Input file not found: "${p}" (looked in ${abs}).`, "INPUT_NOT_FOUND");
+  }
+
+  private changed(p: string): UserError {
+    return new UserError(
+      `Input "${p}" changed while it was being opened (a symlink or folder in its path was swapped). It was not read. Symlinks may only point inside ${this.root}; make sure nothing else modifies the folder.`,
+      "SYMLINK_OUTSIDE_ROOT",
+    );
+  }
+
+  /** Resolve an existing regular file for reading (path checks only; read through openInputFile). */
   async resolveInputFile(p: string): Promise<string> {
+    return (await this.checkInputFile(p)).real;
+  }
+
+  /** realpath inside the root + stat (bigint identity) of an input that must be a regular file. */
+  private async checkInputFile(p: string): Promise<{ abs: string; real: string; st: import("node:fs").BigIntStats }> {
     const abs = this.lexical(p);
     let real: string;
+    let st: import("node:fs").BigIntStats;
     try {
       real = await this.real(abs, p);
+      st = await fs.stat(real, { bigint: true });
     } catch (e) {
       if (e instanceof UserError) throw e;
-      throw new UserError(`Input file not found: "${p}" (looked in ${abs}).`, "INPUT_NOT_FOUND");
+      throw this.notFound(p, abs);
     }
-    const st = await fs.stat(real);
     if (!st.isFile()) throw new UserError(`Input "${p}" is not a regular file.`, "INPUT_NOT_FILE");
-    return real;
+    return { abs, real, st };
+  }
+
+  /**
+   * Open an input file for reading without a check-then-use race (QA M1):
+   * 1. realpath must be inside the root; stat it (identity S1, must be a regular file);
+   * 2. open that real path with O_RDONLY|O_NOFOLLOW|O_NONBLOCK (no symlink at the last component; a FIFO swapped in
+   *    cannot block us);
+   * 3. fstat the handle: it must be a regular file with nlink 1 (a hard link can point at a file outside the root)
+   *    and the same dev/ino as S1;
+   * 4. realpath the original path again: still inside the root, and lstat of it has the same dev/ino as the handle;
+   *    on Linux the handle's own path (/proc/self/fd/N) must also be inside the root.
+   * Any mismatch rejects the input; the caller reads through the returned handle only.
+   * Windows has no O_NOFOLLOW: the open may follow a link at the last component, but steps 3-4 still compare the
+   * opened file with the checked path, so a swapped link is rejected after the open instead of at it.
+   */
+  async openInputFile(p: string): Promise<{ real: string; fh: fs.FileHandle }> {
+    const { abs, real, st: before } = await this.checkInputFile(p);
+    await testHooks.beforeInputOpen?.(real);
+    let fh: fs.FileHandle;
+    try {
+      fh = await fs.open(real, INPUT_FLAGS);
+    } catch (e) {
+      const code = errnoOf(e);
+      if (code === "ENOENT" || code === "ENOTDIR") throw this.notFound(p, abs);
+      if (code === "ELOOP" || code === "EMLINK") throw this.changed(p);
+      if (code === "ENXIO" || code === "EISDIR") throw new UserError(`Input "${p}" is not a regular file.`, "INPUT_NOT_FILE");
+      throw e;
+    }
+    try {
+      await testHooks.afterInputOpen?.(real);
+      const st = await fh.stat({ bigint: true });
+      if (!st.isFile()) throw new UserError(`Input "${p}" is not a regular file.`, "INPUT_NOT_FILE");
+      if (st.nlink > 1n) {
+        throw new UserError(
+          `Input "${p}" is a hard link (${st.nlink} names for the same file). Hard links can point at files outside the allowed root, so they are refused. Copy the file into ${this.root} instead.`,
+          "PATH_OUTSIDE_ROOT",
+        );
+      }
+      if (!sameFile(st, before)) throw this.changed(p);
+      let again: string;
+      let now: import("node:fs").BigIntStats;
+      try {
+        again = await fs.realpath(abs);
+        now = await fs.lstat(again, { bigint: true });
+      } catch {
+        throw this.changed(p);
+      }
+      if (again !== real || !this.isInside(again) || !sameFile(now, st)) throw this.changed(p);
+      if (process.platform === "linux") {
+        const actual = await fs.readlink(`/proc/self/fd/${fh.fd}`).catch(() => undefined);
+        if (actual !== undefined && (actual.endsWith(" (deleted)") || !this.isInside(actual))) throw this.changed(p);
+      }
+      return { real, fh };
+    } catch (e) {
+      await fh.close();
+      throw e;
+    }
   }
 
   /** Resolve an existing directory for reading. */
