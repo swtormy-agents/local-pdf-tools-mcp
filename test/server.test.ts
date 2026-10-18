@@ -34,7 +34,7 @@ describe("server", () => {
   it("wires a core implementation and writes a new file inside the root", async () => {
     const calls: unknown[][] = [];
     const fake = {
-      pdfInfo: async () => ({ pages: 3, encrypted: false }),
+      pdfInfo: async () => ({ pages: 3 }),
       merge: async (list: { bytes: Uint8Array; pages?: number[] }[]) => {
         calls.push(["merge", list.map((i) => i.pages)]);
         return list[0].bytes;
@@ -70,7 +70,7 @@ describe("server", () => {
     const fake = {
       pdfInfo: async (...args: unknown[]) => {
         calls.push(["info", ...args.slice(1)]);
-        return { pages: 3, encrypted: false };
+        return { pages: 3 };
       },
       organize: async (pdf: Uint8Array, ...rest: unknown[]) => {
         calls.push(["organize", ...rest]);

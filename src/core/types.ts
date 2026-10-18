@@ -14,8 +14,10 @@ import type { imagesToPdf, merge, organize, pdfInfo, split } from "@local-pdf-to
 export type {
   ErrorCode,
   ImageInput,
+  ImagesToPdfOptions,
   MergeInput,
   OrganizeOps,
+  PageSize,
   PdfInfo,
   RangeSpec,
   SplitPart,

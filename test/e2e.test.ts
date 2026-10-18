@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { imagesToPdf, PAGE_SIZES } from "@local-pdf-tools/core";
 import * as fx from "@local-pdf-tools/core/fixtures";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createServer } from "../src/server";
@@ -60,7 +61,7 @@ describe("pdf_info", () => {
   it("returns the page count", async () => {
     const r = await call("pdf_info", { input: "p3.pdf" });
     expect(r.isError).toBeFalsy();
-    expect(r.structuredContent).toEqual({ pageCount: 3, encrypted: false });
+    expect(r.structuredContent).toEqual({ pageCount: 3 }); // no encrypted field: encrypted input fails with PDF_ENCRYPTED
   });
   it("encrypted -> PDF_ENCRYPTED, damaged -> PDF_INVALID", async () => {
     expect(await expectError("pdf_info", { input: "encrypted.pdf" }, "PDF_ENCRYPTED")).toMatch(/never decrypted/);
@@ -116,8 +117,9 @@ describe("pdf_split", () => {
   });
   it("pages outside the document -> PAGE_RANGE (in 1-based words)", async () => {
     const m = await expectError("pdf_split", { input: "p3.pdf", mode: "ranges", ranges: [{ from: 2, to: 5 }], outputDir: "split" }, "PAGE_RANGE");
-    expect(m).toMatch(/1-3/);
-    const x = await expectError("pdf_split", { input: "p3.pdf", mode: "extract", pages: [4], outputDir: "split" }, "PAGE_RANGE");
+    expect(m).toContain("(p3.pdf): range 2-5 is outside the document (the document has 3 pages)");
+    const x = await expectError("pdf_split", { input: "p3.pdf", mode: "extract", pages: [1, 4], outputDir: "split" }, "PAGE_RANGE");
+    expect(x).toContain("(p3.pdf): page 4 (position 2 in pages) does not exist (the document has 3 pages)");
     expect(x).not.toMatch(/0-2/);
     await expectError("pdf_split", { input: "encrypted.pdf", mode: "every_n", n: 1, outputDir: "split" }, "PDF_ENCRYPTED");
   });
@@ -151,8 +153,12 @@ describe("pdf_organize", () => {
     expect(allObjectText(doc)).not.toContain(fx.EVIL_MARKER);
   });
   it("errors: PAGE_RANGE (unknown page, nothing left), TOO_MANY_PAGES, PDF_ENCRYPTED", async () => {
-    expect(await expectError("pdf_organize", { input: "p3.pdf", order: [4], outputDir: "org" }, "PAGE_RANGE")).not.toMatch(/0-2/);
-    expect(await expectError("pdf_organize", { input: "p3.pdf", delete: [1, 2, 3], outputDir: "org" }, "PAGE_RANGE")).not.toMatch(/order must be/);
+    const o = await expectError("pdf_organize", { input: "p3.pdf", order: [2, 4], outputDir: "org" }, "PAGE_RANGE");
+    expect(o).toContain("(p3.pdf): page 4 (position 2 in order) does not exist (the document has 3 pages)");
+    expect(o).not.toMatch(/0-2/);
+    const none = await expectError("pdf_organize", { input: "p3.pdf", delete: [1, 2, 3], outputDir: "org" }, "PAGE_RANGE");
+    expect(none).toContain("no pages would be left (the document has 3 pages)");
+    expect(none).not.toMatch(/order must be/);
     await expectError("pdf_organize", { input: "p3.pdf", delete: [7], outputDir: "org" }, "PAGE_RANGE");
     await expectError("pdf_organize", { input: "p1.pdf", order: Array(1001).fill(1), outputDir: "org" }, "TOO_MANY_PAGES");
     await expectError("pdf_organize", { input: "encrypted.pdf", order: [1], outputDir: "org" }, "PDF_ENCRYPTED");
@@ -201,5 +207,32 @@ describe("images_to_pdf", () => {
   it("failed calls write nothing", async () => {
     const out = await fs.readdir(path.join(root, "img"));
     expect(out.sort()).toEqual(["gps.pdf", "images.pdf"]);
+  });
+  it("default options (fit, 0 mm) give exactly the core's default output", async () => {
+    const r = await call("images_to_pdf", { images: ["plain.jpg", "meta.png"], outputDir: "img-opt", outputName: "default" });
+    expect(r.isError, text(r)).toBeFalsy();
+    const expected = await imagesToPdf([{ bytes: fx.plainJpeg() }, { bytes: fx.metadataPng() }]);
+    expect(Buffer.from(await fs.readFile(r.structuredContent.output)).equals(Buffer.from(expected))).toBe(true);
+  });
+  it("pageSize A4/Letter from PAGE_SIZES; marginMm converted to points", async () => {
+    const a4 = await call("images_to_pdf", { images: ["plain.jpg", "rot6.jpg"], pageSize: "A4", marginMm: 10, outputDir: "img-opt", outputName: "a4" });
+    expect(a4.isError, text(a4)).toBeFalsy();
+    const docA4 = await loadPdf(a4.structuredContent.output);
+    for (const p of docA4.getPages()) expect([p.getWidth(), p.getHeight()]).toEqual([...PAGE_SIZES.A4]);
+    assertCleanPdf(docA4);
+    const letter = await call("images_to_pdf", { images: ["meta.png"], pageSize: "Letter", outputDir: "img-opt", outputName: "letter" });
+    const [lp] = (await loadPdf(letter.structuredContent.output)).getPages();
+    expect([lp.getWidth(), lp.getHeight()]).toEqual([...PAGE_SIZES.Letter]);
+    // fit + 25.4 mm (= 72 pt) on every side: the 24x16 image page grows by 144 pt in each direction
+    const fit = await call("images_to_pdf", { images: ["plain.jpg"], marginMm: 25.4, outputDir: "img-opt", outputName: "fit-margin" });
+    const [fp] = (await loadPdf(fit.structuredContent.output)).getPages();
+    expect([Math.round(fp.getWidth()), Math.round(fp.getHeight())]).toEqual([24 + 144, 16 + 144]);
+  });
+  it("bad options are refused by the schema before any file is read or written", async () => {
+    const r = await call("images_to_pdf", { images: ["plain.jpg"], pageSize: "A3", outputDir: "img-bad" });
+    expect(r.isError).toBe(true);
+    const m = await call("images_to_pdf", { images: ["plain.jpg"], marginMm: 60, outputDir: "img-bad" });
+    expect(m.isError).toBe(true);
+    await expect(fs.readdir(path.join(root, "img-bad"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

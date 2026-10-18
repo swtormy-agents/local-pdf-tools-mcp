@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { imagesToPdfSchema, organizeArgsError, pdfMergeSchema, pdfOrganizeSchema, pdfSplitSchema, splitArgsError } from "../src/schemas";
+import { PAGE_SIZES } from "@local-pdf-tools/core";
+import { IMAGE_PAGE_SIZES, imageOptions, imagesToPdfSchema, organizeArgsError, pdfMergeSchema, pdfOrganizeSchema, pdfSplitSchema, PT_PER_MM, splitArgsError } from "../src/schemas";
 
 const obj = (s: Record<string, z.ZodTypeAny>) => z.object(s);
 
@@ -39,10 +40,24 @@ describe("schemas", () => {
     expect(organizeArgsError({ delete: [2] })).toBeNull();
     expect(organizeArgsError({ rotate: [{ page: 1 }] })).toBeNull();
   });
-  it("images_to_pdf: no page size or margin options (the core sizes each page to its image)", () => {
-    const r = obj(imagesToPdfSchema).parse({ images: ["a.jpg"], outputDir: "o" });
-    expect(Object.keys(imagesToPdfSchema).sort()).toEqual(["images", "outputDir", "outputName"]);
-    expect(r).toEqual({ images: ["a.jpg"], outputDir: "o" });
-    expect(obj(imagesToPdfSchema).safeParse({ images: [], outputDir: "o" }).success).toBe(false);
+  it("images_to_pdf: pageSize from the core's PAGE_SIZES (default fit), marginMm 0-50 (default 0)", () => {
+    const o = obj(imagesToPdfSchema);
+    expect(IMAGE_PAGE_SIZES).toEqual(["fit", ...Object.keys(PAGE_SIZES)]);
+    expect(IMAGE_PAGE_SIZES).toEqual(["fit", "A4", "Letter"]);
+    expect(o.parse({ images: ["a.jpg"], outputDir: "o" })).toEqual({ images: ["a.jpg"], outputDir: "o", pageSize: "fit", marginMm: 0 });
+    expect(o.parse({ images: ["a.jpg"], outputDir: "o", pageSize: "Letter", marginMm: 12.5 }).pageSize).toBe("Letter");
+    for (const bad of [{ pageSize: "a4" }, { pageSize: "A3" }, { marginMm: -1 }, { marginMm: 51 }]) {
+      expect(o.safeParse({ images: ["a.jpg"], outputDir: "o", ...bad }).success, JSON.stringify(bad)).toBe(false);
+    }
+    expect(o.safeParse({ images: [], outputDir: "o" }).success).toBe(false);
+  });
+  it("images_to_pdf options: defaults give no core options; margin converted mm -> pt", () => {
+    expect(imageOptions({})).toBeUndefined();
+    expect(imageOptions({ pageSize: "fit", marginMm: 0 })).toBeUndefined();
+    expect(imageOptions({ pageSize: "A4", marginMm: 0 })).toEqual({ pageSize: "A4", margin: 0 });
+    expect(imageOptions({ pageSize: "fit", marginMm: 25.4 })).toEqual({ pageSize: "fit", margin: 72 });
+    expect(imageOptions({ pageSize: "Letter", marginMm: 10 })!.margin).toBeCloseTo(28.3465, 3);
+    // the largest allowed margin is still below the core's limit (half the shorter side of A4)
+    expect(50 * PT_PER_MM).toBeLessThan(Math.min(...PAGE_SIZES.A4) / 2);
   });
 });

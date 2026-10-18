@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { PAGE_SIZES, type ImagesToPdfOptions, type PageSize } from "@local-pdf-tools/core";
+import { MAX_MARGIN_MM } from "./errorMap.js";
 
 const path = z.string().min(1);
 const pageNo = z.number().int().min(1);
@@ -60,17 +62,39 @@ export const pdfOrganizeSchema = {
   outputName: z.string().optional().describe("File name without path (default: <input>-organized)."),
 };
 
-/** The core makes each page the size of its image (1 px = 1 pt, EXIF orientation applied); it has no page size or margin options. */
+/** Page sizes the core accepts: "fit" (page = image size) plus the keys of the core's PAGE_SIZES (A4, Letter). */
+export const IMAGE_PAGE_SIZES = ["fit", ...Object.keys(PAGE_SIZES)] as [PageSize, ...PageSize[]];
+
+/** 1 mm in PDF points; the core takes the margin in points. */
+export const PT_PER_MM = 72 / 25.4;
+
 export const imagesToPdfSchema = {
   images: z
     .array(path)
     .min(1)
     .describe("JPEG or PNG paths in page order (1-50). The type is detected from the file contents. EXIF/GPS and other metadata are removed."),
+  pageSize: z
+    .enum(IMAGE_PAGE_SIZES)
+    .default("fit")
+    .describe("fit (default): each page has the size of its image. A4 or Letter: portrait page, image scaled to fit inside the margins and centered."),
+  marginMm: z
+    .number()
+    .min(0)
+    .max(MAX_MARGIN_MM)
+    .default(0)
+    .describe(`Margin on every side in millimetres (0-${MAX_MARGIN_MM}, default 0). With fit the page grows by twice the margin.`),
   outputDir: path.describe("Directory for the result, relative to the allowed root."),
   outputName: z.string().optional().describe('File name without path (default: "images").'),
 };
 
-/** Cross-field checks for pdf_split that a flat object schema cannot express. Returns an error message or null. */
+/** images_to_pdf arguments -> core options (margin in points). Defaults give no options, so the output is unchanged. */
+export function imageOptions(a: { pageSize?: PageSize; marginMm?: number }): ImagesToPdfOptions | undefined {
+  const pageSize = a.pageSize ?? "fit";
+  const marginMm = a.marginMm ?? 0;
+  if (pageSize === "fit" && marginMm === 0) return undefined;
+  return { pageSize, margin: marginMm * PT_PER_MM };
+}
+
 export function splitArgsError(a: { mode: string; ranges?: unknown[]; n?: number; pages?: unknown[] }): string | null {
   if (a.mode === "ranges" && !a.ranges) return "mode=ranges needs ranges.";
   if (a.mode === "every_n" && !a.n) return "mode=every_n needs n.";

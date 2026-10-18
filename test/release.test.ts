@@ -63,6 +63,32 @@ describe("bundle", () => {
   });
 });
 
+describe("notices vs. the core's THIRD-PARTY.md", () => {
+  const notices = () => read("THIRD_PARTY_NOTICES").replace(/\r\n/g, "\n");
+  const squash = (t: string) => t.replace(/\s+/g, " ").trim();
+  it("contains every verbatim block of the core's THIRD-PARTY.md (comment markers aside)", () => {
+    const md = read("node_modules/@local-pdf-tools/core/THIRD-PARTY.md").replace(/\r\n/g, "\n");
+    const blocks = [...md.matchAll(/```\w*\n([\s\S]*?)\n```/g)].map((m) => m[1]).filter((b) => !/^\s*(npm|node|import)\b/.test(b));
+    expect(blocks.length).toBeGreaterThanOrEqual(10);
+    const all = squash(notices());
+    for (const b of blocks) {
+      const text = b
+        .split("\n")
+        .filter((l) => !/^\s*(\/\*|\*\/|\*)\s*$/.test(l))
+        .map((l) => l.replace(/^\s?(\*|\/\/) ?/, ""))
+        .join("\n");
+      expect(all, b.slice(0, 80)).toContain(squash(text));
+    }
+  });
+  it("pdfkit and Christopher Brown sections use their own verbatim license texts (no generic MIT under another line)", () => {
+    const n = notices();
+    expect(n).toContain(read("scripts/licenses/pdfkit-LICENSE").replace(/\r\n/g, "\n").trimEnd());
+    expect(n).toContain("MIT LICENSE\nCopyright (c) 2014 Devon Govett\n\nPermission is hereby granted");
+    expect(n).toContain(read("scripts/licenses/chbrown-MIT.txt").replace(/\r\n/g, "\n").trimEnd());
+    expect(n).not.toContain("MIT License\n\nCopyright (c) 2014 Devon Govett");
+  });
+});
+
 describe("package", () => {
   it("has no github: (or other git) runtime dependency; the core is a devDependency", () => {
     for (const field of ["dependencies", "peerDependencies", "optionalDependencies", "bundleDependencies"]) {

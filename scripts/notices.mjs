@@ -29,10 +29,45 @@ function header(file, { lines } = {}) {
   return out;
 }
 
-/** The MIT permission text exactly as in pdf-lib's LICENSE.md, under a different copyright line. */
-function mitWith(copyright) {
-  const body = read(nm("pdf-lib/LICENSE.md")).split("\n").slice(4).join("\n");
-  return `MIT License\n\n${copyright}\n\n${body}`;
+/** Every leading block comment of a source file (pdf-lib's FlateStream.js has two: XPDF and pdf.js), verbatim. */
+function blockHeaders(file) {
+  const src = read(nm(file));
+  const out = [];
+  for (const m of src.matchAll(/\/\*\n([\s\S]*?)\*\//g)) {
+    if (!/Copyright/.test(m[1])) continue;
+    out.push(m[1].split("\n").map((l) => l.replace(/^\s?\*\s?/, "")).join("\n").trim());
+  }
+  if (out.length === 0) throw new Error(`no copyright header in ${file}`);
+  return out.join("\n\n");
+}
+
+const coreThirdParty = () => read(nm("@local-pdf-tools/core/THIRD-PARTY.md"));
+const squash = (t) => t.replace(/\s+/g, " ").trim();
+
+/** A file from scripts/licenses/, vendored verbatim from upstream (the source URL is given in the section). */
+const vendored = (name) => read(path.join(root, "scripts/licenses", name));
+
+/**
+ * pdfkit's LICENSE at the commit referenced by pdf-lib's svgPath header, verbatim (scripts/licenses/pdfkit-LICENSE).
+ * Cross-checked against the copy in the core's THIRD-PARTY.md so both products ship the same text.
+ */
+function pdfkitLicense() {
+  const text = vendored("pdfkit-LICENSE");
+  const md = coreThirdParty();
+  const sec = md.slice(md.indexOf("### pdfkit"));
+  const blocks = [...sec.matchAll(/```\n([\s\S]*?)\n```/g)].map((m) => m[1]);
+  if (!blocks.some((b) => b.trimEnd() === text)) throw new Error("pdfkit LICENSE differs from the core's THIRD-PARTY.md");
+  return text;
+}
+
+/** The Apache-2.0 text, checked (whitespace-insensitive) against the full text in the core's THIRD-PARTY.md. */
+function apacheLicense() {
+  const text = vendored("Apache-2.0.txt");
+  const md = coreThirdParty();
+  const sec = md.slice(md.indexOf("## Apache License 2.0"));
+  const m = /```\n([\s\S]*?)\n```/.exec(sec);
+  if (!m || squash(m[1]) !== squash(text)) throw new Error("Apache-2.0 text differs from the core's THIRD-PARTY.md");
+  return text;
 }
 
 /**
@@ -62,7 +97,7 @@ function adobeNotices() {
     .join("\n");
 }
 
-const apache = read(path.join(root, "scripts/licenses/Apache-2.0.txt"));
+const apache = apacheLicense();
 const rule = "=".repeat(78);
 const sub = "-".repeat(78);
 
@@ -80,9 +115,10 @@ export const sections = [
       read(nm("pdf-lib/LICENSE.md")),
       `pdf-lib contains code from other projects (source headers quoted as shipped):\n\n` +
         `* Stream decoders (Stream, DecodeStream, FlateStream, LZWStream, Ascii85Stream, AsciiHexStream,\n  RunLengthStream): ports of Mozilla pdf.js and of XPDF, Apache License 2.0 (full text below).\n\n` +
-        header("pdf-lib/es/core/streams/Stream.js") + "\n\n" +
-        header("pdf-lib/es/core/streams/FlateStream.js").split("\n").slice(0, 6).join("\n"),
-      `* SVG path parser (es/api/svgPath.js), MIT:\n\n` + header("pdf-lib/es/api/svgPath.js") + "\n\n" + mitWith("Copyright (c) 2014 Devon Govett"),
+        `Stream.js (the other decoders differ only in the class name):\n\n` + blockHeaders("pdf-lib/es/core/streams/Stream.js") + "\n\n" +
+        `FlateStream.js:\n\n` + blockHeaders("pdf-lib/es/core/streams/FlateStream.js"),
+      `* SVG path parser (es/api/svgPath.js), MIT:\n\n` + header("pdf-lib/es/api/svgPath.js") +
+        "\n\npdfkit LICENSE, verbatim from\nhttps://github.com/foliojs/pdfkit/blob/1e62e6ffe24b378eb890df507a47610f4c4a7b24/LICENSE:\n\n" + pdfkitLicense(),
       `* Base64 helpers (es/utils/base64.js), MIT:\n\n` + header("pdf-lib/es/utils/base64.js") + "\n\nbase64-arraybuffer LICENSE-MIT:\n\n" + base64ArraybufferLicense(),
       `Apache License 2.0 (applies to the pdf.js and XPDF derived stream decoders above):\n\n${apache}`,
     ],
@@ -94,7 +130,7 @@ export const sections = [
       read(nm("@pdf-lib/standard-fonts/LICENSE.md")),
       `Original repository's license (from its README):\n\n` +
         read(nm("@pdf-lib/standard-fonts/README.md")).split("## Original Repo's License")[1].trim() +
-        "\n\n" + mitWith("Copyright 2015–2018 Christopher Brown."),
+        "\n\nThe linked license text, verbatim from https://chbrown.github.io/licenses/MIT/#2015-2018:\n\n" + vendored("chbrown-MIT.txt"),
       `Base64 helpers (es/utils.js), MIT:\n\n` + header("@pdf-lib/standard-fonts/es/utils.js") + "\n\n(MIT license text: see base64-arraybuffer under pdf-lib above.)",
       `Font metrics of the 14 standard PDF fonts, derived from Adobe AFM files. Notice field of each file, verbatim:\n\n${adobeNotices()}`,
     ],
@@ -125,9 +161,9 @@ export function render() {
     "local-pdf-tools-mcp (MIT, see LICENSE) bundles the following third-party software into dist/.\n" +
     "@modelcontextprotocol/sdk and zod are not bundled; they are installed as regular npm dependencies with their\n" +
     "own license files. This file is generated by scripts/notices.mjs from the installed packages\n" +
-    "(base64-arraybuffer's LICENSE-MIT comes from the THIRD-PARTY.md of @local-pdf-tools/core).\n" +
-    "Where a source header only says \"MIT license\", the standard MIT text (as in pdf-lib's LICENSE.md) is\n" +
-    "reproduced under the copyright line of that header.";
+    "(base64-arraybuffer's LICENSE-MIT comes from the THIRD-PARTY.md of @local-pdf-tools/core; the pdfkit,\n" +
+    "Christopher Brown MIT and Apache-2.0 texts are vendored verbatim from upstream in scripts/licenses/ and\n" +
+    "cross-checked against the core's THIRD-PARTY.md where it has them).";
   const body = sections.map((s) => `${rule}\n${s.title}\n${rule}\n\n${s.parts.join(`\n\n${sub}\n\n`)}`).join("\n\n\n");
   return `${intro}\n\n\n${body}\n`;
 }
