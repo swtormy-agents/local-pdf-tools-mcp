@@ -4,7 +4,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config";
-import { CoreError, type PdfCore } from "../src/core/types";
+import { PdfToolError } from "@local-pdf-tools/core";
+import type { PdfCore } from "../src/core/types";
 import { createServer } from "../src/server";
 import { FIXTURES, tmpRoot } from "./helpers";
 
@@ -30,23 +31,22 @@ describe("server", () => {
     expect(tools.find((t) => t.name === "pdf_info")!.annotations!.readOnlyHint).toBe(true);
     expect(tools.find((t) => t.name === "pdf_merge")!.annotations!.destructiveHint).toBe(false);
   });
-  it("stub core answers NOT_IMPLEMENTED", async () => {
-    const { client } = await connect();
-    const r: any = await client.callTool({ name: "pdf_info", arguments: { input: "a.pdf" } });
-    expect(r.isError).toBe(true);
-    expect(text(r)).toMatch(/NOT_IMPLEMENTED/);
-  });
   it("wires a core implementation and writes a new file inside the root", async () => {
-    const fake: PdfCore = {
-      info: async () => ({ pageCount: 3, pages: [], encrypted: false }),
-      merge: async (pdfs) => pdfs[0],
-      split: async (pdf) => [
-        { pages: [1, 2], bytes: pdf },
-        { pages: [3], bytes: pdf },
-      ],
-      organize: async (pdf) => pdf,
-      imagesToPdf: async () => new Uint8Array(),
-    };
+    const calls: unknown[][] = [];
+    const fake = {
+      pdfInfo: async () => ({ pages: 3, encrypted: false }),
+      merge: async (list: { bytes: Uint8Array; pages?: number[] }[]) => {
+        calls.push(["merge", list.map((i) => i.pages)]);
+        return list[0].bytes;
+      },
+      split: async (pdf: Uint8Array, ranges: unknown) => {
+        calls.push(["split", ranges]);
+        return [
+          { pages: [1, 2], bytes: pdf },
+          { pages: [3], bytes: pdf },
+        ];
+      },
+    } as unknown as PdfCore;
     const { client, root } = await connect(fake);
     const r: any = await client.callTool({ name: "pdf_merge", arguments: { inputs: ["a.pdf", "a.pdf"], outputDir: "out" } });
     expect(r.isError).toBeFalsy();
@@ -54,15 +54,23 @@ describe("server", () => {
     const s: any = await client.callTool({ name: "pdf_split", arguments: { input: "a.pdf", mode: "every_n", n: 2, outputDir: "out" } });
     expect(s.structuredContent.outputs).toEqual([path.join(root, "out", "a-p1-2.pdf"), path.join(root, "out", "a-p3.pdf")]);
     expect(s.structuredContent.files[1].pages).toEqual([3]);
+    const x: any = await client.callTool({ name: "pdf_split", arguments: { input: "a.pdf", mode: "extract", pages: [3, 1], outputDir: "out" } });
+    expect(x.structuredContent.outputs).toEqual([path.join(root, "out", "a-p3_1.pdf")]);
     const again: any = await client.callTool({ name: "pdf_merge", arguments: { inputs: ["a.pdf", "a.pdf"], outputDir: "out" } });
     expect(again.structuredContent.output).toBe(path.join(root, "out", "merged-1.pdf"));
+    expect(calls).toEqual([
+      ["merge", [undefined, undefined]],
+      ["split", [[1, 2], [3, 3]]],
+      ["merge", [[2, 0]]],
+      ["merge", [undefined, undefined]],
+    ]);
   });
   it("pdf_organize passes 0-based ORIGINAL indices and no limits to the core", async () => {
     const calls: unknown[][] = [];
     const fake = {
-      info: async (...args: unknown[]) => {
+      pdfInfo: async (...args: unknown[]) => {
         calls.push(["info", ...args.slice(1)]);
-        return { pageCount: 3, pages: [], encrypted: false };
+        return { pages: 3, encrypted: false };
       },
       organize: async (pdf: Uint8Array, ...rest: unknown[]) => {
         calls.push(["organize", ...rest]);
@@ -87,8 +95,8 @@ describe("server", () => {
   });
   it("maps core errors (encrypted) and refuses paths outside the root", async () => {
     const enc: PdfCore = {
-      info: async () => {
-        throw new CoreError("PDF_ENCRYPTED", "enc");
+      pdfInfo: async () => {
+        throw new PdfToolError("PDF_ENCRYPTED", "enc");
       },
     } as unknown as PdfCore;
     const { client } = await connect(enc);

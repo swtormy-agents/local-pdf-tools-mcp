@@ -2,15 +2,17 @@
 
 Local stdio MCP server for PDF work on your own machine: `pdf_info`, `pdf_merge`, `pdf_split`, `pdf_organize` (reorder/rotate/remove pages), `images_to_pdf`. No network, no telemetry, nothing is uploaded.
 
-Status: skeleton. Tools, schemas, file access rules and limits are in place; the PDF operations call a shared core module that is not wired in yet, so every tool currently answers `NOT_IMPLEMENTED`.
+Status: pre-release. All five tools run on the shared core `@local-pdf-tools/core` (the same code as the website), with end-to-end tests on the core's fixtures. Not published yet.
 
 ## Rules
 - `--root <dir>` (or `LOCAL_PDF_TOOLS_ROOT`) is required. A filesystem root, your home directory, folders that contain it, and paths with an unexpanded `~` are refused. All paths must stay inside the root (symlinks are resolved).
 - Outputs are new files only (`name.pdf`, `name-1.pdf`, ...). Nothing is overwritten or deleted, including on error paths.
 - Encrypted PDFs are refused (`PDF_ENCRYPTED`) and never decrypted.
+- Every output is a new, clean document: no Info dictionary or XMP metadata, no JavaScript, OpenAction, attachments or form fields; only http/https/mailto link annotations survive. JPEG EXIF (incl. GPS), IPTC and comments are stripped from images.
+- stdout carries only MCP JSON-RPC; library warnings go to stderr.
 - Limits (owned by the core, same as the website, not configurable): 100 MB per file, 300 MB per call, 1000 pages per result, 50 files per call, 50 MP per image.
-- Page numbers in all tools are 1-based. `pdf_split` writes `<input>-p1-3.pdf`, `<input>-p5.pdf`, ... `pdf_organize` takes `order` (final sequence of ORIGINAL page numbers; pages not listed are removed), optional `rotate` (`[{"page":2,"degrees":90}]`, multiples of 90, added to the current rotation) and an optional `delete` shortcut (instead of `order`: all pages except these, in original order).
-- Error codes from the core: `PDF_ENCRYPTED`, `PDF_INVALID`, `PAGE_RANGE`, `TOO_LARGE`, `TOO_MANY_PAGES`, `TOO_MANY_FILES`, `IMAGE_TOO_LARGE`, `IMAGE_INVALID`, `UNSUPPORTED_IMAGE`, `NOT_IMPLEMENTED`; plus MCP-side errors (`PATH_OUTSIDE_ROOT`, `BAD_ARGS`, ...).
+- Page numbers in all tools are 1-based. `pdf_split` writes `<input>-p1-3.pdf`, `<input>-p5.pdf`, ... `pdf_organize` takes `order` (final sequence of ORIGINAL page numbers; pages not listed are removed), optional `rotate` (`[{"page":2,"degrees":90}]`, any multiple of 90, added to the current rotation and normalized by the core; entries for the same page are summed). A page may be repeated in `order` to duplicate it. and an optional `delete` shortcut (instead of `order`: all pages except these, in original order). `images_to_pdf` makes each page the size of its image (EXIF orientation applied); the image type is detected from the file contents, not the extension (a PNG named `.jpg` works, HEIC is refused).
+- Error codes from the core: `PDF_ENCRYPTED`, `PDF_INVALID`, `PAGE_RANGE`, `TOO_LARGE`, `TOO_MANY_PAGES`, `TOO_MANY_FILES`, `IMAGE_TOO_LARGE`, `IMAGE_INVALID`, `UNSUPPORTED_IMAGE`; plus MCP-side errors (`PATH_OUTSIDE_ROOT`, `BAD_ARGS`, ...).
 
 ## Development
 ```
@@ -22,17 +24,15 @@ npm run fixtures   # regenerate synthetic fixtures
 ```
 
 ## Core module
-PDF operations come from the shared core `@local-pdf-tools/core` (git dependency `github:swtormy-agents/pdf-tools#<sha>`, package at the repo root, ESM with types). It is not pushed yet, so `src/core/stub.ts` is wired in and answers `NOT_IMPLEMENTED`. Contract (mirrored by hand until then): `src/core/types.ts`.
+PDF operations come from the shared core `@local-pdf-tools/core` (Ryan Foster; public MIT repo `swtormy-agents/pdf-tools`), a devDependency pinned to a full commit sha (`github:swtormy-agents/pdf-tools#<sha>`, plain ESM JavaScript with types, no build step). `src/core/index.ts` is the only place that imports its functions; `src/core/types.ts` re-exports its types.
 
 Division of work:
-- Core: all PDF/image work; owns `LIMITS` and `ERROR_CODES` (no override, limits are not passed in); enforces the 1000-page result limit, strips metadata, cleans up `/Annots`, checks image headers (`IMAGE_TOO_LARGE`, `IMAGE_INVALID`, `UNSUPPORTED_IMAGE`). The MCP layer does not duplicate any of this.
-- MCP layer: allowed root and path checks, file count/size pre-check before reading (same `LIMITS` values), 1-based tool arguments converted to the core's 0-based indices (`src/adapter.ts`), output file naming, never-overwrite writes, error messages (`src/errorMap.ts`).
-- `split(bytes, spec)` returns `[{ pages /* 1-based */, bytes }]`; `organize(bytes, { order, rotate? })` uses 0-based indices of ORIGINAL pages, empty `order` gives `PAGE_RANGE`.
+- Core: all PDF/image work; owns `LIMITS` and `ERROR_CODES` (no override); enforces the 1000-page result limit, strips metadata/JavaScript/attachments/forms, cleans up `/Annots`, strips JPEG APP1/APP13/COM, detects the image type by signature and checks image headers (`IMAGE_TOO_LARGE`, `IMAGE_INVALID`, `UNSUPPORTED_IMAGE`). The MCP layer does not duplicate any of this.
+- MCP layer: allowed root and path checks, file count/size pre-check before reading (same `LIMITS` values), 1-based tool arguments converted to the core's 0-based indexes (`src/adapter.ts`), `every_n` ranges, output file naming, never-overwrite writes, error messages (`src/errorMap.ts`, which also names the failing input of a multi-file call from the core's `details.index`).
 
-Swap from the stub to the real core (one PR, when Ryan gives the commit sha):
-1. `npm install "github:swtormy-agents/pdf-tools#<full-sha>"` (pinned sha, never a branch).
-2. `src/core/index.ts`: replace the stub import with `@local-pdf-tools/core`.
-3. `src/limits.ts`: `export { LIMITS } from "@local-pdf-tools/core"`; `src/errors.ts`: use the core's `ERROR_CODES`.
-4. Replace hand-written types in `src/core/types.ts` with the core's types; add fixture-based tests from `@local-pdf-tools/core/fixtures` (see `test/fixtures/README.md`).
+To move to a newer core: `npm install -D "github:swtormy-agents/pdf-tools#<full-sha>"` (never a branch), `npm run notices`, `npm test`.
+
+## Build and release
+`npm run build` (`scripts/build.mjs`) bundles `src/` with esbuild into `dist/` (ESM, node20), inlining `@local-pdf-tools/core`, `pdf-lib` and pdf-lib's dependencies. `@modelcontextprotocol/sdk` and `zod` stay regular npm dependencies, so the published package has no git dependency. `THIRD_PARTY_NOTICES` (shipped in the package) is generated by `npm run notices` from the installed packages; `test/release.test.ts` fails if it is out of date or misses a package inlined into the bundle, and checks `npm pack --dry-run`.
 
 MIT licensed.

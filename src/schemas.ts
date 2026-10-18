@@ -26,10 +26,13 @@ export const pdfSplitSchema = {
   outputDir: path.describe("Directory for the results, relative to the allowed root."),
 };
 
-/** A clockwise rotation for one page. Degrees are a multiple of 90 and are added to the page's current rotation. */
+/**
+ * A clockwise rotation for one page. Any multiple of 90 (negative or above 360 too): the core adds it to the page's
+ * current rotation and normalizes mod 360, so no normalization happens here.
+ */
 const rotation = z.object({
-  page: pageNo.describe("1-based page number of the ORIGINAL document."),
-  degrees: z.number().int().multipleOf(90).describe("Clockwise degrees, a multiple of 90 (e.g. 90, 180, 270, -90)."),
+  page: pageNo.describe("1-based page number of the ORIGINAL document. Applies to every copy of that page in order."),
+  degrees: z.number().int().multipleOf(90).describe("Clockwise degrees, any multiple of 90 (e.g. 90, 180, 270, -90, 450)."),
 });
 
 export const pdfOrganizeSchema = {
@@ -39,14 +42,15 @@ export const pdfOrganizeSchema = {
     .min(1)
     .optional()
     .describe(
-      "Final page sequence as 1-based page numbers of the ORIGINAL document, e.g. [3,1,2]. Pages not listed are removed. " +
+      "Final page sequence as 1-based page numbers of the ORIGINAL document, e.g. [3,1,2]. Pages not listed are removed; " +
+        "a page may be repeated to duplicate it, e.g. [1,1,2]. " +
         "May be omitted only together with delete and/or rotate: then all pages are kept in original order (minus delete).",
     ),
   rotate: z
     .array(rotation)
     .min(1)
     .optional()
-    .describe('Rotations by ORIGINAL 1-based page number, e.g. [{"page":2,"degrees":90}]. Added to the current rotation.'),
+    .describe('Rotations by ORIGINAL 1-based page number, e.g. [{"page":2,"degrees":90}]. Added to the current rotation; entries for the same page are summed.'),
   delete: z
     .array(pageNo)
     .min(1)
@@ -56,10 +60,12 @@ export const pdfOrganizeSchema = {
   outputName: z.string().optional().describe("File name without path (default: <input>-organized)."),
 };
 
+/** The core makes each page the size of its image (1 px = 1 pt, EXIF orientation applied); it has no page size or margin options. */
 export const imagesToPdfSchema = {
-  images: z.array(path).min(1).describe("JPEG or PNG paths in page order (1-50). EXIF/GPS and other metadata are removed."),
-  pageSize: z.enum(["a4", "letter", "fit"]).default("a4").describe("a4, letter, or fit (page = image size)."),
-  marginMm: z.number().min(0).max(50).default(0).describe("Page margin in millimetres (0-50)."),
+  images: z
+    .array(path)
+    .min(1)
+    .describe("JPEG or PNG paths in page order (1-50). The type is detected from the file contents. EXIF/GPS and other metadata are removed."),
   outputDir: path.describe("Directory for the result, relative to the allowed root."),
   outputName: z.string().optional().describe('File name without path (default: "images").'),
 };
@@ -72,15 +78,8 @@ export function splitArgsError(a: { mode: string; ranges?: unknown[]; n?: number
   return null;
 }
 
-export function organizeArgsError(a: { order?: unknown[]; rotate?: { page: number }[]; delete?: unknown[] }): string | null {
+export function organizeArgsError(a: { order?: unknown[]; rotate?: unknown[]; delete?: unknown[] }): string | null {
   if (a.order && a.delete) return "Use either order (the final page sequence; pages not listed are removed) or delete, not both.";
   if (!a.order && !a.rotate && !a.delete) return "Give order (final page sequence), and/or rotate, or delete.";
-  if (a.rotate) {
-    const seen = new Set<number>();
-    for (const r of a.rotate) {
-      if (seen.has(r.page)) return `Page ${r.page} appears more than once in rotate; give one total rotation per page.`;
-      seen.add(r.page);
-    }
-  }
   return null;
 }

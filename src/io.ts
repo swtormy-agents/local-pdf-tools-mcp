@@ -16,34 +16,31 @@ export type InputKind = "pdf" | "image";
 /** Count/size checks that need no file access (also used by tests). */
 export function checkCounts(n: number, limits: Limits = LIMITS): void {
   if (n === 0) throw new UserError("No input files given.", "NO_INPUT");
-  if (n > limits.maxFiles) throw new UserError(`Too many input files (${n}): max ${limits.maxFiles} per call.`, "TOO_MANY_FILES");
+  if (n > limits.MAX_FILES) throw new UserError(`Too many input files (${n}): max ${limits.MAX_FILES} per call.`, "TOO_MANY_FILES");
 }
 
 export function checkSizes(sizes: number[], limits: Limits = LIMITS, names: string[] = []): void {
   let total = 0;
   sizes.forEach((s, i) => {
-    if (s > limits.maxFileBytes) {
-      throw new UserError(`${names[i] ?? "Input"} is ${(s / MB).toFixed(1)} MB: max ${limits.maxFileBytes / MB} MB per file.`, "TOO_LARGE");
+    if (s > limits.MAX_FILE_BYTES) {
+      throw new UserError(`${names[i] ?? "Input"} is ${(s / MB).toFixed(1)} MB: max ${limits.MAX_FILE_BYTES / MB} MB per file.`, "TOO_LARGE");
     }
     total += s;
   });
-  if (total > limits.maxTotalBytes) {
-    throw new UserError(`Inputs total ${(total / MB).toFixed(1)} MB: max ${limits.maxTotalBytes / MB} MB per call.`, "TOO_LARGE");
+  if (total > limits.MAX_TOTAL_BYTES) {
+    throw new UserError(`Inputs total ${(total / MB).toFixed(1)} MB: max ${limits.MAX_TOTAL_BYTES / MB} MB per call.`, "TOO_LARGE");
   }
 }
 
-/** Cheap signature check so obviously wrong files fail fast with a clear message (the core does the real header checks). */
-export function sniff(bytes: Uint8Array, kind: InputKind, name: string): "pdf" | "jpeg" | "png" {
-  const b = bytes;
-  if (kind === "pdf") {
-    // %PDF- may be preceded by junk; the spec allows it within the first 1024 bytes.
-    const head = Buffer.from(b.subarray(0, 1024)).toString("latin1");
-    if (head.includes("%PDF-")) return "pdf";
-    throw new UserError(`${name} is not a PDF (no %PDF- header).`, "PDF_INVALID");
-  }
-  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "jpeg";
-  if (b.length >= 8 && Buffer.from(b.subarray(0, 8)).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "png";
-  throw new UserError(`${name} is not a JPEG or PNG image. Only JPEG and PNG are supported; convert it first.`, "UNSUPPORTED_IMAGE");
+/**
+ * Cheap PDF signature check so obviously wrong files fail fast with the file name (the core parses and checks again).
+ * There is no image check here: the core detects JPEG/PNG by signature (a PNG named .jpg is fine, HEIC/GIF/... are
+ * UNSUPPORTED_IMAGE), so an MCP-side copy would only duplicate it.
+ */
+export function sniffPdf(bytes: Uint8Array, name: string): void {
+  // %PDF- may be preceded by junk; the spec allows it within the first 1024 bytes.
+  const head = Buffer.from(bytes.subarray(0, 1024)).toString("latin1");
+  if (!head.includes("%PDF-")) throw new UserError(`${name} is not a PDF (no %PDF- header).`, "PDF_INVALID");
 }
 
 /**
@@ -62,7 +59,7 @@ export async function readInputs(guard: PathGuard, inputs: string[], kind: Input
       const { size } = await fh.stat();
       checkSizes([size], limits, [inputs[i]]);
       total += size;
-      checkSizes([total], { ...limits, maxFileBytes: Infinity });
+      checkSizes([total], { ...limits, MAX_FILE_BYTES: Infinity });
       const buf = Buffer.alloc(size);
       let off = 0;
       while (off < size) {
@@ -71,7 +68,7 @@ export async function readInputs(guard: PathGuard, inputs: string[], kind: Input
         off += bytesRead;
       }
       const bytes = new Uint8Array(buf.buffer, buf.byteOffset, off);
-      sniff(bytes, kind, inputs[i]);
+      if (kind === "pdf") sniffPdf(bytes, inputs[i]);
       out.push({ path: p, bytes });
     } finally {
       await fh.close();

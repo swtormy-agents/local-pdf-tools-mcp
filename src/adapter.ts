@@ -1,6 +1,6 @@
 /**
  * Pure conversions between the MCP tool arguments (user-facing, 1-based page numbers) and the core contract.
- * No limits, metadata or annotation handling here: those belong to the core.
+ * No limits, metadata, rotation normalization or annotation handling here: those belong to the core.
  */
 import type { OrganizeOps } from "./core/types.js";
 import { UserError } from "./errors.js";
@@ -11,15 +11,17 @@ export interface OrganizeArgs {
   delete?: number[];
 }
 
-/** pdf_organize needs the page count (one core.info call) only when order is omitted. */
+/** pdf_organize needs the page count (one core.pdfInfo call) only when order is omitted. */
 export function organizeNeedsPageCount(a: OrganizeArgs): boolean {
   return !a.order;
 }
 
 /**
  * Convert 1-based MCP arguments to the core's 0-based OrganizeOps (indices of ORIGINAL pages).
+ * order is passed through as-is (repeats allowed; the core validates indices and the page limit).
  * order omitted => all pages in original order minus `delete`. An empty result is passed on; the core answers PAGE_RANGE.
- * Validate first with organizeArgsError (schemas.ts).
+ * rotate degrees are passed through unchanged (any multiple of 90; the core adds them and normalizes mod 360).
+ * Several rotate entries for the same page are summed. Validate first with organizeArgsError (schemas.ts).
  */
 export function toOrganizeOps(a: OrganizeArgs, pageCount?: number): OrganizeOps {
   let order: number[];
@@ -35,8 +37,19 @@ export function toOrganizeOps(a: OrganizeArgs, pageCount?: number): OrganizeOps 
     order = Array.from({ length: pageCount }, (_, i) => i).filter((i) => !del.has(i + 1));
   }
   const ops: OrganizeOps = { order };
-  if (a.rotate) ops.rotate = Object.fromEntries(a.rotate.map((r) => [r.page - 1, r.degrees]));
+  if (a.rotate) {
+    const rotate: Record<number, number> = {};
+    for (const r of a.rotate) rotate[r.page - 1] = (rotate[r.page - 1] ?? 0) + r.degrees;
+    ops.rotate = rotate;
+  }
   return ops;
+}
+
+/** 1-based inclusive [from, to] ranges of n pages each, covering the whole document (pdf_split mode=every_n). */
+export function everyNRanges(pageCount: number, n: number): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  for (let from = 1; from <= pageCount; from += n) out.push([from, Math.min(from + n - 1, pageCount)]);
+  return out;
 }
 
 /** "p1-3", "p5", "p1-3_5_7-8" from 1-based page numbers (runs of consecutive ascending pages are collapsed). */

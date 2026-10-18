@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { organizeNeedsPageCount, pagesLabel, splitPartBase, toOrganizeOps } from "../src/adapter";
+import { everyNRanges, organizeNeedsPageCount, pagesLabel, splitPartBase, toOrganizeOps } from "../src/adapter";
 
 describe("organize adapter (1-based MCP args -> 0-based core ops on ORIGINAL pages)", () => {
   it("converts order and rotate to 0-based", () => {
@@ -12,12 +12,24 @@ describe("organize adapter (1-based MCP args -> 0-based core ops on ORIGINAL pag
     expect(toOrganizeOps({ delete: [2] }, 4)).toEqual({ order: [0, 2, 3] });
     expect(toOrganizeOps({ delete: [1, 3], rotate: [{ page: 2, degrees: 180 }] }, 3)).toEqual({ order: [1], rotate: { 1: 180 } });
   });
+  it("passes repeats and raw degrees through (the core normalizes); sums duplicate rotate entries", () => {
+    expect(toOrganizeOps({ order: [1, 1, 2], rotate: [{ page: 1, degrees: 450 }] })).toEqual({ order: [0, 0, 1], rotate: { 0: 450 } });
+    expect(toOrganizeOps({ order: [1], rotate: [{ page: 1, degrees: 90 }, { page: 1, degrees: 180 }] })).toEqual({ order: [0], rotate: { 0: 270 } });
+  });
   it("rotate only keeps all pages", () => {
     expect(toOrganizeOps({ rotate: [{ page: 1, degrees: 90 }] }, 3)).toEqual({ order: [0, 1, 2], rotate: { 0: 90 } });
   });
   it("deleting everything yields an empty order (the core answers PAGE_RANGE); unknown pages fail here", () => {
     expect(toOrganizeOps({ delete: [1, 2] }, 2)).toEqual({ order: [] });
     expect(() => toOrganizeOps({ delete: [4] }, 3)).toThrow(expect.objectContaining({ code: "PAGE_RANGE" }));
+  });
+});
+
+describe("split every_n", () => {
+  it("builds 1-based inclusive ranges", () => {
+    expect(everyNRanges(5, 2)).toEqual([[1, 2], [3, 4], [5, 5]]);
+    expect(everyNRanges(3, 10)).toEqual([[1, 3]]);
+    expect(everyNRanges(3, 1)).toEqual([[1, 1], [2, 2], [3, 3]]);
   });
 });
 

@@ -1,10 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { organizeNeedsPageCount, splitPartBase, toOrganizeOps } from "./adapter.js";
+import { everyNRanges, organizeNeedsPageCount, splitPartBase, toOrganizeOps } from "./adapter.js";
 import type { Config } from "./config.js";
-import { core as defaultCore, type PdfCore, type SplitSpec } from "./core/index.js";
+import { core as defaultCore, type PdfCore, type SplitPart } from "./core/index.js";
 import { mapCoreError } from "./errorMap.js";
 import { UserError } from "./errors.js";
-import { baseOf, outputBase, readInputs, sniff, writePdf } from "./io.js";
+import { baseOf, outputBase, readInputs, writePdf } from "./io.js";
 import { LIMITS } from "./limits.js";
 import { PathGuard } from "./pathGuard.js";
 import {
@@ -37,11 +37,12 @@ export async function createServer(config: Config, core: PdfCore = defaultCore):
   const guard = await PathGuard.create(config.allowedRoot);
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
   const local = `Runs only on this machine; nothing is uploaded. Paths are relative to the allowed root (${guard.root}).`;
-  const run = async <T>(fn: () => Promise<T>, file?: string): Promise<T> => {
+  /** Call the core; map its errors. `file` names the single input, `files` the inputs of a multi-file call. */
+  const run = async <T>(fn: () => Promise<T>, file?: string, files?: readonly string[]): Promise<T> => {
     try {
       return await fn();
     } catch (e) {
-      throw mapCoreError(e, file);
+      throw mapCoreError(e, file, files);
     }
   };
 
@@ -49,15 +50,15 @@ export async function createServer(config: Config, core: PdfCore = defaultCore):
     "pdf_info",
     {
       title: "PDF info",
-      description: `Read page count, page sizes and whether a local PDF is encrypted. Does not extract text. ${local}`,
+      description: `Read the page count of a local PDF. Encrypted PDFs are reported as PDF_ENCRYPTED (never decrypted). Does not extract text. ${local}`,
       inputSchema: pdfInfoSchema,
       annotations: { ...readAnn, title: "PDF info" },
     },
     async (a) => {
       try {
         const [f] = await readInputs(guard, [a.input], "pdf");
-        const info = await run(() => core.info(f.bytes), a.input);
-        return ok(`${a.input}: ${info.pageCount} page(s)${info.encrypted ? ", encrypted" : ""}.`, { ...info });
+        const info = await run(() => core.pdfInfo(f.bytes), a.input);
+        return ok(`${a.input}: ${info.pages} page(s).`, { pageCount: info.pages, encrypted: false });
       } catch (e) {
         return errorResult(e);
       }
@@ -68,7 +69,7 @@ export async function createServer(config: Config, core: PdfCore = defaultCore):
     "pdf_merge",
     {
       title: "Merge PDFs",
-      description: `Merge 2-${LIMITS.maxFiles} local PDFs into one new file, in the given order. Encrypted PDFs are refused, never decrypted. Writes a new file; never overwrites. ${local}`,
+      description: `Merge 2-${LIMITS.MAX_FILES} local PDFs into one new file, in the given order. Encrypted PDFs are refused, never decrypted. Writes a new file; never overwrites. ${local}`,
       inputSchema: pdfMergeSchema,
       annotations: { ...writeAnn, title: "Merge PDFs" },
     },
@@ -77,7 +78,7 @@ export async function createServer(config: Config, core: PdfCore = defaultCore):
         const base = outputBase(a.outputName, "merged");
         const files = await readInputs(guard, a.inputs, "pdf");
         const outDir = await guard.resolveOutputDir(a.outputDir);
-        const bytes = await run(() => core.merge(files.map((f) => f.bytes)));
+        const bytes = await run(() => core.merge(files.map((f) => ({ bytes: f.bytes }))), undefined, a.inputs);
         const output = await writePdf(guard, outDir, base, bytes);
         return ok(`Merged ${files.length} file(s) into ${output}.`, { output, bytes: bytes.byteLength });
       } catch (e) {
@@ -98,11 +99,21 @@ export async function createServer(config: Config, core: PdfCore = defaultCore):
       try {
         const bad = splitArgsError(a);
         if (bad) throw new UserError(bad, "BAD_ARGS");
-        const spec: SplitSpec =
-          a.mode === "ranges" ? { mode: "ranges", ranges: a.ranges! } : a.mode === "every_n" ? { mode: "every_n", n: a.n! } : { mode: "extract", pages: a.pages! };
         const [f] = await readInputs(guard, [a.input], "pdf");
         const outDir = await guard.resolveOutputDir(a.outputDir);
-        const parts = await run(() => core.split(f.bytes, spec), a.input);
+        let parts: SplitPart[];
+        if (a.mode === "extract") {
+          // One output with the listed pages in the listed order (repeats allowed): a one-item merge with 0-based indexes.
+          const pages = a.pages!;
+          const bytes = await run(() => core.merge([{ bytes: f.bytes, pages: pages.map((p) => p - 1) }]), a.input);
+          parts = [{ pages, bytes }];
+        } else {
+          const ranges =
+            a.mode === "ranges"
+              ? a.ranges!.map((r) => [r.from, r.to] as [number, number])
+              : everyNRanges((await run(() => core.pdfInfo(f.bytes), a.input)).pages, a.n!);
+          parts = await run(() => core.split(f.bytes, ranges), a.input);
+        }
         const base = baseOf(a.input);
         const outputs: string[] = [];
         const files: { output: string; pages: number[] }[] = [];
@@ -122,7 +133,7 @@ export async function createServer(config: Config, core: PdfCore = defaultCore):
     "pdf_organize",
     {
       title: "Reorder, rotate or delete PDF pages",
-      description: `Reorder, rotate and/or remove pages of a local PDF and save the result as a new file. Page numbers are 1-based and always refer to the ORIGINAL document. order is the final page sequence (pages not listed are removed); rotate adds multiples of 90 degrees clockwise; delete is a shortcut for "all pages except these". ${local}`,
+      description: `Reorder, rotate and/or remove pages of a local PDF and save the result as a new file. Page numbers are 1-based and always refer to the ORIGINAL document. order is the final page sequence (pages not listed are removed); pages may be repeated to duplicate them; rotate adds any multiple of 90 degrees clockwise; delete is a shortcut for "all pages except these". ${local}`,
       inputSchema: pdfOrganizeSchema,
       annotations: { ...writeAnn, title: "Organize PDF pages" },
     },
@@ -133,7 +144,7 @@ export async function createServer(config: Config, core: PdfCore = defaultCore):
         const base = outputBase(a.outputName, `${baseOf(a.input)}-organized`);
         const [f] = await readInputs(guard, [a.input], "pdf");
         const outDir = await guard.resolveOutputDir(a.outputDir);
-        const pageCount = organizeNeedsPageCount(a) ? (await run(() => core.info(f.bytes), a.input)).pageCount : undefined;
+        const pageCount = organizeNeedsPageCount(a) ? (await run(() => core.pdfInfo(f.bytes), a.input)).pages : undefined;
         const ops = toOrganizeOps(a, pageCount);
         const bytes = await run(() => core.organize(f.bytes, ops), a.input);
         const output = await writePdf(guard, outDir, base, bytes);
@@ -148,7 +159,7 @@ export async function createServer(config: Config, core: PdfCore = defaultCore):
     "images_to_pdf",
     {
       title: "Images to PDF",
-      description: `Combine 1-${LIMITS.maxFiles} local JPEG/PNG images into one PDF (one image per page). EXIF, GPS and other metadata are removed. Max ${LIMITS.maxImageMegapixels} MP per image. ${local}`,
+      description: `Combine 1-${LIMITS.MAX_FILES} local JPEG/PNG images into one PDF, one image per page; each page has the size of its image (EXIF orientation applied). The type is detected from the file contents. EXIF, GPS and other metadata are removed. Max ${LIMITS.MAX_IMAGE_PIXELS / 1e6} MP per image. ${local}`,
       inputSchema: imagesToPdfSchema,
       annotations: { ...writeAnn, title: "Images to PDF" },
     },
@@ -157,8 +168,7 @@ export async function createServer(config: Config, core: PdfCore = defaultCore):
         const base = outputBase(a.outputName, "images");
         const files = await readInputs(guard, a.images, "image");
         const outDir = await guard.resolveOutputDir(a.outputDir);
-        const images = files.map((f, i) => ({ bytes: f.bytes, type: sniff(f.bytes, "image", a.images[i]) as "jpeg" | "png" }));
-        const bytes = await run(() => core.imagesToPdf(images, { pageSize: a.pageSize, marginMm: a.marginMm }));
+        const bytes = await run(() => core.imagesToPdf(files.map((f) => ({ bytes: f.bytes }))), undefined, a.images);
         const output = await writePdf(guard, outDir, base, bytes);
         return ok(`Created ${output} from ${files.length} image(s).`, { output, bytes: bytes.byteLength });
       } catch (e) {

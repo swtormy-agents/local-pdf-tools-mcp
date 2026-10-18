@@ -1,7 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { checkCounts, checkSizes, outputBase, readInputs, sniff } from "../src/io";
+import { LIMITS as CORE_LIMITS } from "@local-pdf-tools/core";
+import { checkCounts, checkSizes, outputBase, readInputs, sniffPdf } from "../src/io";
 import { LIMITS } from "../src/limits";
 import { PathGuard } from "../src/pathGuard";
 import { FIXTURES, tmpRoot } from "./helpers";
@@ -10,8 +11,9 @@ const MB = 1024 * 1024;
 const L = LIMITS;
 
 describe("limits", () => {
-  it("has the agreed shared values", () => {
-    expect(L).toEqual({ maxFileBytes: 100 * MB, maxTotalBytes: 300 * MB, maxResultPages: 1000, maxFiles: 50, maxImageMegapixels: 50 });
+  it("is the core's LIMITS object with the agreed values", () => {
+    expect(L).toBe(CORE_LIMITS);
+    expect(L).toEqual({ MAX_FILE_BYTES: 100 * MB, MAX_TOTAL_BYTES: 300 * MB, MAX_PAGES: 1000, MAX_FILES: 50, MAX_IMAGE_PIXELS: 50_000_000 });
     expect(Object.isFrozen(L)).toBe(true);
   });
   it("defaults to the shared LIMITS", () => {
@@ -29,12 +31,10 @@ describe("limits", () => {
     expect(() => checkSizes([100 * MB, 100 * MB, 100 * MB], L)).not.toThrow();
     expect(() => checkSizes([100 * MB, 100 * MB, 100 * MB, 1], L)).toThrow(/max 300 MB/);
   });
-  it("sniffs PDF and image signatures", () => {
-    expect(sniff(Buffer.from("%PDF-1.7\n"), "pdf", "a")).toBe("pdf");
-    expect(() => sniff(Buffer.from("hello"), "pdf", "a")).toThrow(expect.objectContaining({ code: "PDF_INVALID" }));
-    expect(sniff(Buffer.from([0xff, 0xd8, 0xff, 0xe0]), "image", "a")).toBe("jpeg");
-    expect(sniff(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), "image", "a")).toBe("png");
-    expect(() => sniff(Buffer.from("GIF89a"), "image", "a")).toThrow(expect.objectContaining({ code: "UNSUPPORTED_IMAGE" }));
+  it("sniffs the PDF signature (images are detected by the core only)", () => {
+    expect(() => sniffPdf(Buffer.from("%PDF-1.7\n"), "a")).not.toThrow();
+    expect(() => sniffPdf(Buffer.from("junk\n%PDF-1.4\n"), "a")).not.toThrow();
+    expect(() => sniffPdf(Buffer.from("hello"), "a")).toThrow(expect.objectContaining({ code: "PDF_INVALID" }));
   });
   it("output names are restricted", () => {
     expect(outputBase(undefined, "merged")).toBe("merged");
@@ -49,8 +49,8 @@ describe("limits", () => {
     const [f] = await readInputs(g, ["a.pdf"], "pdf");
     expect(Buffer.from(f.bytes).toString("latin1")).toMatch(/^%PDF-1\.7/);
     await expect(readInputs(g, ["bad.pdf"], "pdf")).rejects.toMatchObject({ code: "PDF_INVALID" });
-    await expect(readInputs(g, ["a.pdf"], "pdf", { ...L, maxFileBytes: 10 })).rejects.toMatchObject({ code: "TOO_LARGE" });
-    await expect(readInputs(g, ["a.pdf", "a.pdf"], "pdf", { ...L, maxTotalBytes: 400 })).rejects.toMatchObject({ code: "TOO_LARGE" });
+    await expect(readInputs(g, ["a.pdf"], "pdf", { ...L, MAX_FILE_BYTES: 10 })).rejects.toMatchObject({ code: "TOO_LARGE" });
+    await expect(readInputs(g, ["a.pdf", "a.pdf"], "pdf", { ...L, MAX_TOTAL_BYTES: 400 })).rejects.toMatchObject({ code: "TOO_LARGE" });
     await expect(readInputs(g, ["../x.pdf"], "pdf")).rejects.toMatchObject({ code: "PATH_OUTSIDE_ROOT" });
   });
 });

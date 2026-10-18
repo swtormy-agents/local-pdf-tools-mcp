@@ -2,6 +2,9 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadConfig } from "./config.js";
 import { createServer, SERVER_NAME, SERVER_VERSION } from "./server.js";
+import { routeConsoleToStderr } from "./stdio.js";
+
+routeConsoleToStderr();
 
 async function main() {
   const config = loadConfig();

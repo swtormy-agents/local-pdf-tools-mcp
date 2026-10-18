@@ -11,13 +11,15 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD_PARTY_NOTICES"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "node scripts/build.mjs",
     "test": "npm run build && vitest run",
-    "fixtures": "node test/fixtures/generate.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "notices": "node scripts/notices.mjs",
+    "fixtures": "node test/fixtures/generate.mjs"
   },
   "engines": {
     "node": ">=20"
@@ -29,7 +31,10 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@local-pdf-tools/core": "github:swtormy-agents/pdf-tools#6021daa4cb0ff332c18107377e2dca159ffc7a38",
     "@types/node": "^26.6.5",
+    "esbuild": "0.28.2",
+    "pdf-lib": "1.17.1",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"
   }
