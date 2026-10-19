@@ -118,10 +118,11 @@ export class PathGuard {
     return new UserError(`Input file not found: "${p}" (looked in ${abs}).`, "INPUT_NOT_FOUND");
   }
 
+  /** The checked path no longer names the file that was opened (dev/ino mismatch, symlink swapped in). */
   private changed(p: string): UserError {
     return new UserError(
-      `Input "${p}" changed while it was being opened (a symlink or folder in its path was swapped). It was not read. Symlinks may only point inside ${this.root}; make sure nothing else modifies the folder.`,
-      "SYMLINK_OUTSIDE_ROOT",
+      `Input "${p}" changed while it was being opened (the file, a symlink or a folder in its path was replaced). It was not read. Make sure nothing else modifies the folder and try again.`,
+      "PATH_CHANGED",
     );
   }
 
@@ -155,7 +156,9 @@ export class PathGuard {
    *    and the same dev/ino as S1;
    * 4. realpath the original path again: still inside the root, and lstat of it has the same dev/ino as the handle;
    *    on Linux the handle's own path (/proc/self/fd/N) must also be inside the root.
-   * Any mismatch rejects the input; the caller reads through the returned handle only.
+   * Any mismatch rejects the input; the caller reads through the returned handle only. Codes: PATH_CHANGED for a hard
+   * link (nlink > 1), a dev/ino mismatch or a symlink swapped in at the last component (ELOOP); SYMLINK_OUTSIDE_ROOT
+   * if the path now resolves outside the root; INPUT_NOT_FOUND if it vanished (ENOENT); INPUT_NOT_FILE for a non-file.
    * Windows has no O_NOFOLLOW: the open may follow a link at the last component, but steps 3-4 still compare the
    * opened file with the checked path, so a swapped link is rejected after the open instead of at it.
    */
@@ -179,7 +182,7 @@ export class PathGuard {
       if (st.nlink > 1n) {
         throw new UserError(
           `Input "${p}" is a hard link (${st.nlink} names for the same file). Hard links can point at files outside the allowed root, so they are refused. Copy the file into ${this.root} instead.`,
-          "PATH_OUTSIDE_ROOT",
+          "PATH_CHANGED",
         );
       }
       if (!sameFile(st, before)) throw this.changed(p);
@@ -191,7 +194,10 @@ export class PathGuard {
       } catch {
         throw this.changed(p);
       }
-      if (again !== real || !this.isInside(again) || !sameFile(now, st)) throw this.changed(p);
+      if (!this.isInside(again)) {
+        throw new UserError(`Path "${p}" resolves (via a symlink) to a location outside the allowed root. Symlinks may only point inside ${this.root}.`, "SYMLINK_OUTSIDE_ROOT");
+      }
+      if (again !== real || !sameFile(now, st)) throw this.changed(p);
       if (process.platform === "linux") {
         const actual = await fs.readlink(`/proc/self/fd/${fh.fd}`).catch(() => undefined);
         if (actual !== undefined && (actual.endsWith(" (deleted)") || !this.isInside(actual))) throw this.changed(p);

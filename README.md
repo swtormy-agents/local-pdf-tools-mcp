@@ -6,14 +6,23 @@ Status: pre-release. All five tools run on the shared core `@local-pdf-tools/cor
 
 ## Rules
 - `--root <dir>` (or `LOCAL_PDF_TOOLS_ROOT`) is required. A filesystem root, your home directory, folders that contain it, and paths with an unexpanded `~` are refused. All paths must stay inside the root (symlinks are resolved).
-- Inputs are opened race-free: the path is checked with realpath, opened with `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`, and the open handle must be a regular file with the same device/inode as the checked path, which must still resolve inside the root after the open (on Linux the handle's own path is checked too). The file is read through that handle only. Hard links (more than one name for the file, `nlink > 1`) are refused, because they can point at files outside the root. Windows has no `O_NOFOLLOW`: the open itself may follow a link swapped in at the last moment, but the post-open identity check rejects it, so nothing outside the root is read.
+- Inputs are opened race-free: the path is checked with realpath, opened with `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`, and the open handle must be a regular file with the same device/inode as the checked path, which must still resolve inside the root after the open (on Linux the handle's own path is checked too). The file is read through that handle only. Hard links (more than one name for the file, `nlink > 1`) are refused (`PATH_CHANGED`), because they can point at files outside the root. Windows has no `O_NOFOLLOW`: the open itself may follow a link swapped in at the last moment, but the post-open identity check rejects it (`PATH_CHANGED`), so nothing outside the root is read.
 - Outputs are new files only (`name.pdf`, `name-1.pdf`, ...). Nothing is overwritten or deleted, including on error paths.
 - Encrypted PDFs are refused (`PDF_ENCRYPTED`) and never decrypted.
 - Every output is a new, clean document: no Info dictionary or XMP metadata, no JavaScript, OpenAction, attachments or form fields; only http/https/mailto link annotations survive. JPEG EXIF (incl. GPS), IPTC and comments are stripped from images.
 - stdout carries only MCP JSON-RPC; library warnings go to stderr. The core does not write to stdout (pdf-lib's only `console.log`, in `FlateStream`, is unreachable, and the core has a test for that); the server still routes `console.log/info/debug/...` to stderr before it starts (`src/stdio.ts`) as defense in depth, and `test/stdio.test.ts` checks stdout of the bundled server.
 - Limits (owned by the core, same as the website, not configurable): 100 MB per file, 300 MB per call, 1000 pages per result, 50 files per call, 50 MP per image.
 - Page numbers in all tools are 1-based. `pdf_split` writes `<input>-p1-3.pdf`, `<input>-p5.pdf`, ... `pdf_organize` takes `order` (final sequence of ORIGINAL page numbers; pages not listed are removed), optional `rotate` (`[{"page":2,"degrees":90}]`, any multiple of 90, added to the current rotation and normalized by the core; entries for the same page are summed) and an optional `delete` shortcut (instead of `order`: all pages except these, in original order). A page may be repeated in `order` to duplicate it. `pdf_info` returns `{ pageCount }` (an encrypted PDF fails with `PDF_ENCRYPTED`). `images_to_pdf` applies EXIF orientation; `pageSize` is `fit` (default: each page has the size of its image), `A4` or `Letter` (portrait, image scaled to fit and centered; sizes come from the core's `PAGE_SIZES`); `marginMm` (0-50, default 0) is converted to points for the core (with `fit` the page grows by twice the margin). With the defaults the output is byte-for-byte the core's default output. The image type is detected from the file contents, not the extension (a PNG named `.jpg` works, HEIC is refused).
-- Error codes from the core: `PDF_ENCRYPTED`, `PDF_INVALID`, `PAGE_RANGE`, `TOO_LARGE`, `TOO_MANY_PAGES`, `TOO_MANY_FILES`, `IMAGE_TOO_LARGE`, `IMAGE_INVALID`, `UNSUPPORTED_IMAGE`; plus MCP-side errors (`PATH_OUTSIDE_ROOT`, `BAD_ARGS`, ...).
+- Error codes from the core: `PDF_ENCRYPTED`, `PDF_INVALID`, `PAGE_RANGE`, `TOO_LARGE`, `TOO_MANY_PAGES`, `TOO_MANY_FILES`, `IMAGE_TOO_LARGE`, `IMAGE_INVALID`, `UNSUPPORTED_IMAGE`; plus MCP-side errors, among them:
+
+  | Code | Meaning |
+  |---|---|
+  | `PATH_OUTSIDE_ROOT` | the path (after `..` / absolute resolution) is outside the root |
+  | `SYMLINK_OUTSIDE_ROOT` | the path resolves through a symlink to a location outside the root |
+  | `PATH_CHANGED` | input refused: it is a hard link (`nlink > 1`), or the file/a folder in its path was replaced while it was being opened (device/inode differ from the checked path, or a symlink appeared at the last component); nothing was read |
+  | `INPUT_NOT_FOUND` / `INPUT_NOT_FILE` | the input does not exist (also if it disappears during the open) / is not a regular file |
+  | `OUTPUT_DIR_CHANGED` (`_FILE_LEFT`) | the output folder was replaced while writing |
+  | `BAD_ARGS`, `BAD_OUTPUT_NAME`, `PATH_INVALID`, `WRITE_FAILED`, ... | invalid arguments / output problems |
 
 ## Development
 ```

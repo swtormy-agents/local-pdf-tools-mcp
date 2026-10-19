@@ -75,6 +75,36 @@ describe("notices vs. the core's THIRD-PARTY.md", () => {
     const missing = blocks.filter((b) => !all.includes(b));
     expect(missing.map((b) => b.slice(0, 80))).toEqual([]);
   });
+  it("checks every occurrence of every core block individually (no copy may be edited on its own)", () => {
+    const md = read("node_modules/@local-pdf-tools/core/THIRD-PARTY.md").replace(/\r\n/g, "\n");
+    const blocks = [...md.matchAll(/^```\n([\s\S]*?)\n```$/gm)].map((m) => m[1]);
+    const adobe = blocks.filter((b) => /Adobe Systems Incorporated/.test(b));
+    const others = blocks.filter((b) => !adobe.includes(b));
+    expect(adobe).toHaveLength(6);
+    const all = notices();
+    const count = (b: string) => all.split(b).length - 1;
+    // Non-Adobe blocks are quoted exactly once each, at one position.
+    for (const b of others) expect(count(b), b.slice(0, 80)).toBe(1);
+    // Adobe: one "Font: notice" line per standard font; each line's notice must equal one core block exactly, and
+    // every core block must be used. An edit to any single line fails here.
+    const sec = all.slice(all.indexOf("Notice field of each file, verbatim:\n\n"));
+    const lines = sec.split("\n\n")[1].split("\n");
+    const fonts = lines.map((l) => l.slice(0, l.indexOf(": ")));
+    expect(fonts).toEqual([
+      "Courier-Bold", "Courier-BoldOblique", "Courier-Oblique", "Courier",
+      "Helvetica-Bold", "Helvetica-BoldOblique", "Helvetica-Oblique", "Helvetica",
+      "Symbol", "Times-Bold", "Times-BoldItalic", "Times-Italic", "Times-Roman", "ZapfDingbats",
+    ]);
+    const used = new Set<string>();
+    for (const l of lines) {
+      const notice = l.slice(l.indexOf(": ") + 2);
+      expect(adobe, `${l.slice(0, 60)} does not match a core block`).toContain(notice);
+      used.add(notice);
+    }
+    expect(used.size).toBe(adobe.length);
+    // Total occurrences of the Adobe blocks are exactly the 14 lines (none quoted anywhere else, none lost).
+    expect(adobe.reduce((n, b) => n + count(b), 0)).toBe(14);
+  });
   it("pdfkit and Christopher Brown sections use their own verbatim license texts (no generic MIT under another line)", () => {
     const n = notices();
     expect(n).toContain(read("scripts/licenses/pdfkit-LICENSE").replace(/\r\n/g, "\n").trimEnd());

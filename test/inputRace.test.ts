@@ -47,13 +47,13 @@ describe.skipIf(!SYMLINKS)("input TOCTOU: folder swapped for a symlink to outsid
   it("swap between the check and open(): rejected, outside content never returned", async () => {
     const { guard, swapToOutside } = await setup();
     testHooks.beforeInputOpen = swapToOutside;
-    await expect(readInputs(guard, ["rin/doc.pdf"], "pdf")).rejects.toMatchObject({ code: "SYMLINK_OUTSIDE_ROOT" });
+    await expect(readInputs(guard, ["rin/doc.pdf"], "pdf")).rejects.toMatchObject({ code: "PATH_CHANGED" });
   });
   it("swap before open() and back right after it (path looks fine again): dev/ino mismatch, rejected", async () => {
     const { guard, swapToOutside, swapBack } = await setup();
     testHooks.beforeInputOpen = swapToOutside;
     testHooks.afterInputOpen = swapBack;
-    await expect(readInputs(guard, ["rin/doc.pdf"], "pdf")).rejects.toMatchObject({ code: "SYMLINK_OUTSIDE_ROOT" });
+    await expect(readInputs(guard, ["rin/doc.pdf"], "pdf")).rejects.toMatchObject({ code: "PATH_CHANGED" });
   });
   it("last component swapped for a symlink: O_NOFOLLOW refuses it", async () => {
     const { root, outside, guard } = await setup();
@@ -62,7 +62,7 @@ describe.skipIf(!SYMLINKS)("input TOCTOU: folder swapped for a symlink to outsid
       await fs.rename(file, file + ".moved");
       await fs.symlink(path.join(outside, "doc.pdf"), file);
     };
-    await expect(readInputs(guard, ["rin/doc.pdf"], "pdf")).rejects.toMatchObject({ code: "SYMLINK_OUTSIDE_ROOT" });
+    await expect(readInputs(guard, ["rin/doc.pdf"], "pdf")).rejects.toMatchObject({ code: "PATH_CHANGED" });
   });
   it.skipIf(process.platform === "win32")("a FIFO swapped in never blocks the read", async () => {
     const { root, guard } = await setup();
@@ -71,7 +71,7 @@ describe.skipIf(!SYMLINKS)("input TOCTOU: folder swapped for a symlink to outsid
       await fs.rm(file);
       await new Promise<void>((res, rej) => spawn("mkfifo", [file]).on("exit", (c) => (c === 0 ? res() : rej(new Error("mkfifo")))));
     };
-    await expect(readInputs(guard, ["rin/doc.pdf"], "pdf")).rejects.toMatchObject({ code: expect.stringMatching(/^(INPUT_NOT_FILE|SYMLINK_OUTSIDE_ROOT)$/) });
+    await expect(readInputs(guard, ["rin/doc.pdf"], "pdf")).rejects.toMatchObject({ code: expect.stringMatching(/^(INPUT_NOT_FILE|PATH_CHANGED)$/) });
   });
 });
 
@@ -89,13 +89,13 @@ describe("input races and hard links (all platforms)", () => {
       await fs.writeFile(file + ".new", "%PDF-1.7 OTHER");
       await fs.rename(file + ".new", file);
     };
-    await expect(readInputs(guard, ["rin/doc.pdf"], "pdf")).rejects.toMatchObject({ code: "SYMLINK_OUTSIDE_ROOT" });
+    await expect(readInputs(guard, ["rin/doc.pdf"], "pdf")).rejects.toMatchObject({ code: "PATH_CHANGED" });
   });
   it("a hard link inside the root to a file outside it is refused (nlink > 1) with a clear message", async () => {
     const { root, outside, guard } = await setup();
     await fs.link(path.join(outside, "doc.pdf"), path.join(root, "hard.pdf"));
     const err: any = await readInputs(guard, ["hard.pdf"], "pdf").catch((e) => e);
-    expect(err?.code).toBe("PATH_OUTSIDE_ROOT");
+    expect(err?.code).toBe("PATH_CHANGED");
     expect(err.message).toMatch(/hard link/);
     expect(err.message).not.toContain("SECRET");
   });
@@ -141,7 +141,7 @@ describe.skipIf(!SYMLINKS)("live race (poc/race.mjs, in mode)", () => {
         }
       }
       expect(res.outsideReads, JSON.stringify(res)).toBe(0);
-      for (const code of Object.keys(res.codes)) expect(["INPUT_NOT_FOUND", "SYMLINK_OUTSIDE_ROOT", "INPUT_NOT_FILE"], JSON.stringify(res)).toContain(code);
+      for (const code of Object.keys(res.codes)) expect(["INPUT_NOT_FOUND", "SYMLINK_OUTSIDE_ROOT", "PATH_CHANGED", "INPUT_NOT_FILE"], JSON.stringify(res)).toContain(code);
     } finally {
       swapper.kill();
     }
