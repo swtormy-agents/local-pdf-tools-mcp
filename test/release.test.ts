@@ -70,19 +70,10 @@ describe("notices vs. the core's THIRD-PARTY.md", () => {
     const blocks = [...md.matchAll(/^```\n([\s\S]*?)\n```$/gm)].map((m) => m[1]);
     expect(blocks).toHaveLength(14);
     const all = notices();
-    for (const b of blocks) {
-      // Source-header blocks (/* ... */ or // lines) are quoted in NOTICES without the comment markers; the text
-      // itself must still match exactly, line by line. Everything else must appear unchanged.
-      const isComment = /^(\/\*|\/\/)/.test(b);
-      const text = isComment
-        ? b
-            .split("\n")
-            .filter((l) => !/^\s*(\/\*|\*\/)\s*$/.test(l))
-            .map((l) => l.replace(/^ \*( |$)/, "").replace(/^\/\/ ?/, ""))
-            .join("\n")
-        : b;
-      expect(all.includes(text), `missing verbatim: ${text.slice(0, 80)}`).toBe(true);
-    }
+    // Every block, including the source-header comments (quoted with their /* */ and // markers), must appear
+    // unchanged; the only normalization is CRLF->LF on both sides.
+    const missing = blocks.filter((b) => !all.includes(b));
+    expect(missing.map((b) => b.slice(0, 80))).toEqual([]);
   });
   it("pdfkit and Christopher Brown sections use their own verbatim license texts (no generic MIT under another line)", () => {
     const n = notices();

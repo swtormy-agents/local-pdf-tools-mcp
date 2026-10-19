@@ -14,28 +14,26 @@ const read = (p) => fs.readFileSync(p, "utf8").replace(/\r\n/g, "\n").trimEnd();
 const version = (pkg) => JSON.parse(read(nm(`${pkg}/package.json`))).version;
 const require = createRequire(import.meta.url);
 
-/** Leading block comment (/* ... *\/) or run of // comments of a source file, without comment markers. */
-function header(file, { lines } = {}) {
+/**
+ * Leading block comment (/* ... *\/) or run of // comments of a source file, verbatim (comment markers included).
+ * `markers: false` drops only the leading "// " of each line (used for pako's zlib notice, which the core's
+ * THIRD-PARTY.md quotes as plain text; the release test checks the result against the core byte for byte).
+ */
+function header(file, { markers = true } = {}) {
   const src = read(nm(file)).replace(/^'use strict';\n+/, "");
-  let out;
-  if (src.startsWith("/*")) {
-    out = src.slice(2, src.indexOf("*/")).split("\n").map((l) => l.replace(/^\s?\*\s?/, "")).join("\n").trim();
-  } else {
-    const m = /^(?:\/\/.*\n)+/.exec(src);
-    if (!m) throw new Error(`no header in ${file}`);
-    out = m[0].split("\n").map((l) => l.replace(/^\/\/ ?/, "")).join("\n").trim();
-  }
-  if (lines) out = out.split("\n").slice(0, lines).join("\n").trim();
-  return out;
+  if (src.startsWith("/*")) return src.slice(0, src.indexOf("*/") + 2);
+  const m = /^(?:\/\/.*\n)+/.exec(src);
+  if (!m) throw new Error(`no header in ${file}`);
+  const text = m[0].trimEnd();
+  return markers ? text : text.split("\n").map((l) => l.replace(/^\/\/ ?/, "")).join("\n").trim();
 }
 
-/** Every leading block comment of a source file (pdf-lib's FlateStream.js has two: XPDF and pdf.js), verbatim. */
+/** Every copyright block comment of a source file (pdf-lib's FlateStream.js has two: XPDF and pdf.js), verbatim. */
 function blockHeaders(file) {
   const src = read(nm(file));
   const out = [];
-  for (const m of src.matchAll(/\/\*\n([\s\S]*?)\*\//g)) {
-    if (!/Copyright/.test(m[1])) continue;
-    out.push(m[1].split("\n").map((l) => l.replace(/^\s?\*\s?/, "")).join("\n").trim());
+  for (const m of src.matchAll(/\/\*\n[\s\S]*?\*\//g)) {
+    if (/Copyright/.test(m[0])) out.push(m[0]);
   }
   if (out.length === 0) throw new Error(`no copyright header in ${file}`);
   return out.join("\n\n");
@@ -144,7 +142,7 @@ export const sections = [
     title: `pako ${version("pako")} - (MIT AND Zlib)\nhttps://github.com/nodeca/pako`,
     parts: [
       read(nm("pako/LICENSE")),
-      `zlib notice from the pako source headers (lib/zlib/*.js), verbatim:\n\n` + header("pako/lib/zlib/deflate.js"),
+      `zlib notice from the pako source headers (lib/zlib/*.js), verbatim:\n\n` + header("pako/lib/zlib/deflate.js", { markers: false }),
     ],
   },
   {

@@ -72,34 +72,40 @@ pdf-lib contains code from other projects (source headers quoted as shipped):
 
 Stream.js (the other decoders differ only in the class name):
 
-Copyright 2012 Mozilla Foundation
-
-The Stream class contained in this file is a TypeScript port of the
-JavaScript Stream class in Mozilla's pdf.js project, made available
-under the Apache 2.0 open source license.
+/*
+ * Copyright 2012 Mozilla Foundation
+ *
+ * The Stream class contained in this file is a TypeScript port of the
+ * JavaScript Stream class in Mozilla's pdf.js project, made available
+ * under the Apache 2.0 open source license.
+ */
 
 FlateStream.js:
 
-Copyright 1996-2003 Glyph & Cog, LLC
+/*
+ * Copyright 1996-2003 Glyph & Cog, LLC
+ *
+ * The flate stream implementation contained in this file is a JavaScript port
+ * of XPDF's implementation, made available under the Apache 2.0 open source
+ * license.
+ */
 
-The flate stream implementation contained in this file is a JavaScript port
-of XPDF's implementation, made available under the Apache 2.0 open source
-license.
-
-Copyright 2012 Mozilla Foundation
-
-The FlateStream class contained in this file is a TypeScript port of the
-JavaScript FlateStream class in Mozilla's pdf.js project, made available
-under the Apache 2.0 open source license.
+/*
+ * Copyright 2012 Mozilla Foundation
+ *
+ * The FlateStream class contained in this file is a TypeScript port of the
+ * JavaScript FlateStream class in Mozilla's pdf.js project, made available
+ * under the Apache 2.0 open source license.
+ */
 
 ------------------------------------------------------------------------------
 
 * SVG path parser (es/api/svgPath.js), MIT:
 
-Originated from pdfkit Copyright (c) 2014 Devon Govett
-https://github.com/foliojs/pdfkit/blob/1e62e6ffe24b378eb890df507a47610f4c4a7b24/lib/path.js
-MIT LICENSE
-Updated for pdf-lib & TypeScript by Jeremy Messenger
+// Originated from pdfkit Copyright (c) 2014 Devon Govett
+// https://github.com/foliojs/pdfkit/blob/1e62e6ffe24b378eb890df507a47610f4c4a7b24/lib/path.js
+// MIT LICENSE
+// Updated for pdf-lib & TypeScript by Jeremy Messenger
 
 pdfkit LICENSE, verbatim from
 https://github.com/foliojs/pdfkit/blob/1e62e6ffe24b378eb890df507a47610f4c4a7b24/LICENSE:
@@ -117,14 +123,17 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 * Base64 helpers (es/utils/base64.js), MIT:
 
-The `chars`, `lookup`, `encode`, and `decode` members of this file are
-licensed under the following:
-
-    base64-arraybuffer
-    https://github.com/niklasvh/base64-arraybuffer
-
-    Copyright (c) 2012 Niklas von Hertzen
-    Licensed under the MIT license.
+/*
+ * The `chars`, `lookup`, `encode`, and `decode` members of this file are
+ * licensed under the following:
+ *
+ *     base64-arraybuffer
+ *     https://github.com/niklasvh/base64-arraybuffer
+ *
+ *     Copyright (c) 2012 Niklas von Hertzen
+ *     Licensed under the MIT license.
+ *
+ */
 
 base64-arraybuffer LICENSE-MIT:
 
@@ -409,14 +418,17 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 Base64 helpers (es/utils.js), MIT:
 
-The `chars`, `lookup`, and `decodeFromBase64` members of this file are
-licensed under the following:
-
-    base64-arraybuffer
-    https://github.com/niklasvh/base64-arraybuffer
-
-    Copyright (c) 2012 Niklas von Hertzen
-    Licensed under the MIT license.
+/*
+ * The `chars`, `lookup`, and `decodeFromBase64` members of this file are
+ * licensed under the following:
+ *
+ *     base64-arraybuffer
+ *     https://github.com/niklasvh/base64-arraybuffer
+ *
+ *     Copyright (c) 2012 Niklas von Hertzen
+ *     Licensed under the MIT license.
+ *
+ */
 
 (MIT license text: see base64-arraybuffer under pdf-lib above.)
 
