@@ -70,7 +70,7 @@ export async function createServer(config: Config, core: PdfCore = defaultCore):
     "pdf_merge",
     {
       title: "Merge PDFs",
-      description: `Merge 2-${LIMITS.MAX_FILES} local PDFs into one new file, in the given order. Encrypted PDFs are refused, never decrypted. Writes a new file; never overwrites. ${local}`,
+      description: `Merge 2-${LIMITS.MAX_FILES} local PDFs into one new file, in the given order (max ${LIMITS.MAX_PAGES} pages in the result). Encrypted PDFs are refused, never decrypted. Writes a new file; never overwrites. ${local}`,
       inputSchema: pdfMergeSchema,
       annotations: { ...writeAnn, title: "Merge PDFs" },
     },
@@ -92,7 +92,7 @@ export async function createServer(config: Config, core: PdfCore = defaultCore):
     "pdf_split",
     {
       title: "Split PDF",
-      description: `Split a local PDF by page ranges, into chunks of n pages, or extract selected pages into one file. Page numbers are 1-based. Output files are named <input>-p<pages>.pdf (e.g. report-p1-3.pdf). Writes new files; never overwrites. ${local}`,
+      description: `Split a local PDF by page ranges, into chunks of n pages, or extract selected pages into one file. Page numbers are 1-based. Limits: max ${LIMITS.MAX_PAGES} pages per output file, ${LIMITS.MAX_SPLIT_PARTS} output files and ${LIMITS.MAX_SPLIT_TOTAL_PAGES} pages over all files together (repeats counted); extract writes one file of at most ${LIMITS.MAX_PAGES} pages. Output files are named <input>-p<pages>.pdf (e.g. report-p1-3.pdf). Writes new files; never overwrites. ${local}`,
       inputSchema: pdfSplitSchema,
       annotations: { ...writeAnn, title: "Split PDF" },
     },

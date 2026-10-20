@@ -13,7 +13,7 @@ const L = LIMITS;
 describe("limits", () => {
   it("is the core's LIMITS object with the agreed values", () => {
     expect(L).toBe(CORE_LIMITS);
-    expect(L).toEqual({ MAX_FILE_BYTES: 100 * MB, MAX_TOTAL_BYTES: 300 * MB, MAX_PAGES: 1000, MAX_FILES: 50, MAX_IMAGE_PIXELS: 50_000_000 });
+    expect(L).toEqual({ MAX_FILE_BYTES: 100 * MB, MAX_TOTAL_BYTES: 300 * MB, MAX_PAGES: 1000, MAX_FILES: 50, MAX_IMAGE_PIXELS: 50_000_000, MAX_SPLIT_TOTAL_PAGES: 5000, MAX_SPLIT_PARTS: 50, MAX_DECOMPRESSED_BYTES: 500 * MB });
     expect(Object.isFrozen(L)).toBe(true);
   });
   it("defaults to the shared LIMITS", () => {
