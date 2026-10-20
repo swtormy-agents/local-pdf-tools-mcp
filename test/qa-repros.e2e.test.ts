@@ -200,6 +200,32 @@ describe.skip("QA v2 (re-QA of aea0eb0): indirect /S, /Type and /Subtype - SKIPP
   }
 });
 
+/**
+ * Megan's QA of core ea16ac5 (/workspace/qa/pdfcore/fixtures/v3, suite.py v3:refchain-40, REPORT.md blocker 1): a reference
+ * chain longer than 32 hops skips the sanitizer but is still copied, so the JPEG keeps EXIF/GPS and a /S /Launch dict
+ * (LEAK-CHAIN-LAUNCH) reached via ExtGState /BM is written out. Acceptable: PDF_INVALID error or clean output.
+ */
+const refchainOk = async (r: any) => {
+  if (r.isError) { expect(text(r)).toContain("[PDF_INVALID]"); return []; }
+  return (r.structuredContent.outputs ?? [r.structuredContent.output]) as string[];
+};
+describe("QA v3 refchain-40 fixture check", () => {
+  it("the raw refchain-40.pdf fails the clean-output checker", async () => {
+    await expect(expectClean(path.join(root, "refchain-40.pdf"))).rejects.toThrow();
+  });
+});
+describe.skip("QA v3 (ea16ac5): refchain-40 - SKIPPED: needs core fix after ea16ac5 FAIL, log b17f993", () => {
+  const f = "refchain-40.pdf";
+  it(`${f}: merge, split, organize -> PDF_INVALID or clean (no EXIF/GPS, no Launch)`, async () => {
+    const runs = [
+      await call("pdf_merge", { inputs: [f, f], outputDir: "v3", outputName: "refchain-40-m" }),
+      await call("pdf_split", { input: f, mode: "ranges", ranges: [{ from: 1, to: 1 }], outputDir: "v3" }),
+      await call("pdf_organize", { input: f, order: [1, 1], outputDir: "v3" }),
+    ];
+    for (const r of runs) for (const o of await refchainOk(r)) await expectClean(o);
+  });
+});
+
 describe("QA B2: /ObjStm Flate bomb (6.2 GB inflated) -> TOO_LARGE decompressed, bounded memory", () => {
   it("every PDF tool refuses it quickly with a clear message; peak RSS stays reasonable", async () => {
     expect((await fs.stat(path.join(root, "bomb.pdf"))).size).toBeLessThan(100 * 1024 * 1024);
