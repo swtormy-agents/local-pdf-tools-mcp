@@ -31,7 +31,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@local-pdf-tools/core": "github:swtormy-agents/pdf-tools#aea0eb06bf6b64debc66d3f187def79f026bb449",
+    "@local-pdf-tools/core": "github:swtormy-agents/pdf-tools#047da26535530d1235f9d6df9bba946960a4cfee",
     "@types/node": "^26.6.5",
     "esbuild": "0.28.2",
     "pdf-lib": "1.17.1",

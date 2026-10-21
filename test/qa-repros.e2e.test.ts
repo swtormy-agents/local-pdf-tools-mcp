@@ -1,6 +1,6 @@
 /**
  * QA repros (Megan, core 331a28a review: /workspace/qa/pdfcore suite.py + REPORT.md, MCP review /workspace/qa/mcp2),
- * run end-to-end through the MCP server against the REAL core (pinned aea0eb0, which fixes them).
+ * run end-to-end through the MCP server against the REAL core (fixed since core aea0eb0; pin now 047da26).
  * Fixtures in test/fixtures/qa/ are Megan's synthetic files (see README there); large inputs are generated here.
  */
 import fs from "node:fs/promises";
@@ -181,9 +181,9 @@ describe("QA B1: metadata and active content inside input PDFs (core allowlist r
  * Megan's re-QA of core aea0eb0 (/workspace/qa/pdfcore/fixtures/v2, suite.py v2:privkeys-indirect-s and
  * v2:exif-indirect-subtype): the core's sanitize does not resolve indirect references, so a Launch action whose /S and
  * /Type are indirect objects, and a JPEG whose image /Subtype is indirect (EXIF/GPS kept), pass through. FAIL on
- * aea0eb0; SKIPPED until the core fix lands (Ryan). Enable (remove .skip) when bumping the pin to the fixed core.
+ * aea0eb0; fixed in core 047da26 (pdf-tools main), now enabled.
  */
-describe.skip("QA v2 (re-QA of aea0eb0): indirect /S, /Type and /Subtype - SKIPPED: fails on core aea0eb0, awaiting core fix", () => {
+describe("QA v2 (re-QA of aea0eb0, fixed in core 047da26): indirect /S, /Type and /Subtype", () => {
   for (const f of ["privkeys-indirect-s.pdf", "exif-indirect-subtype.pdf"]) {
     it(`${f}: merge, split, organize outputs are clean`, async () => {
       await expect(expectClean(path.join(root, f)), "fixture must fail the checker").rejects.toThrow();
@@ -203,7 +203,7 @@ describe.skip("QA v2 (re-QA of aea0eb0): indirect /S, /Type and /Subtype - SKIPP
 /**
  * Megan's QA of core ea16ac5 (/workspace/qa/pdfcore/fixtures/v3, suite.py v3:refchain-40, REPORT.md blocker 1): a reference
  * chain longer than 32 hops skips the sanitizer but is still copied, so the JPEG keeps EXIF/GPS and a /S /Launch dict
- * (LEAK-CHAIN-LAUNCH) reached via ExtGState /BM is written out. Acceptable: PDF_INVALID error or clean output.
+ * (LEAK-CHAIN-LAUNCH) reached via ExtGState /BM is written out. Fixed in core 047da26. Acceptable: PDF_INVALID error or clean output.
  */
 const refchainOk = async (r: any) => {
   if (r.isError) { expect(text(r)).toContain("[PDF_INVALID]"); return []; }
@@ -214,7 +214,7 @@ describe("QA v3 refchain-40 fixture check", () => {
     await expect(expectClean(path.join(root, "refchain-40.pdf"))).rejects.toThrow();
   });
 });
-describe.skip("QA v3 (ea16ac5): refchain-40 - SKIPPED: needs core fix after ea16ac5 FAIL, log b17f993", () => {
+describe("QA v3 (ea16ac5 FAIL, fixed in core 047da26): refchain-40", () => {
   const f = "refchain-40.pdf";
   it(`${f}: merge, split, organize -> PDF_INVALID or clean (no EXIF/GPS, no Launch)`, async () => {
     const runs = [

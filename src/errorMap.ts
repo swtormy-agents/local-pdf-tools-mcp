@@ -101,9 +101,11 @@ export function mapCoreError(e: unknown, ctx: ErrorContext = {}): UserError {
     PDF_INVALID:
       details?.option === "pageSize" || details?.option === "margin"
         ? `Invalid images_to_pdf ${details.option === "margin" ? "marginMm" : "pageSize"}: pageSize must be fit, A4 or Letter; marginMm must be 0-${MAX_MARGIN_MM}.`
-        : details?.reason === "image"
-          ? `The PDF${where} contains a JPEG image that cannot be cleaned of its metadata (unusual filter chain or damaged image), so it was not processed. Re-export the PDF from the original app.`
-          : `The file${where} is not a valid PDF or is damaged. Re-export it from the original app.`,
+        : details?.reason === "refchain"
+          ? `The PDF${where} has a chain of object references that is too long or broken, so it can't be processed safely.`
+          : details?.reason === "image"
+            ? `The PDF${where} contains a JPEG image that cannot be cleaned of its metadata (unusual filter chain or damaged image), so it was not processed. Re-export the PDF from the original app.`
+            : `The file${where} is not a valid PDF or is damaged. Re-export it from the original app.`,
     PAGE_RANGE: `Page numbers are out of range${where}: ${pageDetail}. Use 1-based page numbers that exist in the document (see pdf_info), and keep at least one page.`,
     TOO_LARGE:
       details?.reason === "decompressed"

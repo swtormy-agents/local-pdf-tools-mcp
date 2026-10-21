@@ -65,6 +65,7 @@ describe("error mapping", () => {
     expect(mapCoreError(new PdfToolError("PDF_INVALID", "x", { option: "margin", max: 297.64 }), { files: ["a.jpg"], op: "images" }).message).toMatch(/Invalid images_to_pdf marginMm/);
     expect(mapCoreError(new PdfToolError("PDF_INVALID", "x", { option: "pageSize" }), { op: "images" }).message).toMatch(/Invalid images_to_pdf pageSize/);
     expect(mapCoreError(new PdfToolError("PDF_INVALID", "x"), { file: "a.pdf" }).message).toMatch(/not a valid PDF/);
+    expect(mapCoreError(new PdfToolError("PDF_INVALID", "x", { reason: "refchain" }), { file: "a.pdf" }).message).toMatch(/chain of object references that is too long or broken/);
   });
   it("image errors are distinct and actionable", () => {
     expect(mapCoreError(new PdfToolError("UNSUPPORTED_IMAGE", ""), { file: "a.jpg" }).message).toMatch(/not a JPEG or PNG \(detected from the file contents/);
