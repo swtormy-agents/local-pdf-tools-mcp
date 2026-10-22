@@ -30,6 +30,10 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm test
+      - name: QA TOCTOU stress (inputs incl. macOS simulation, outputs), 20k calls each
+        run: npx vitest run test/toctouStress.test.ts
+        env:
+          TOCTOU_N: "20000"
       - name: Race tests x N
         shell: bash
         env:

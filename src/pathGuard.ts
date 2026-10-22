@@ -376,6 +376,18 @@ export class PathGuard {
           moved = r.cwdAfter !== dir;
           fh = await adoptFd(r.fd, C.O_WRONLY);
         }
+        // Verify via the fd BEFORE any data is written (Linux: /proc/self/fd names the real location of the new file).
+        if (!moved && process.platform === "linux" && !testHooks.noProcFd) {
+          const actual = await fs.readlink(`/proc/self/fd/${fh.fd}`).catch(() => undefined);
+          if (actual !== undefined && (actual.endsWith(" (deleted)") || path.dirname(actual) !== dir)) moved = true;
+        }
+        if (moved) {
+          try {
+            await this.verifyWritten(target, fh, true);
+          } finally {
+            await fh.close();
+          }
+        }
       } catch (e) {
         gate = undefined;
         if (e instanceof UserError) throw e;
