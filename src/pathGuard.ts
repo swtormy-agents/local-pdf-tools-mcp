@@ -1,4 +1,5 @@
 import { constants as C } from "node:fs";
+import { closeSync, openSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { assertSafeRoot } from "./config.js";
@@ -58,6 +59,8 @@ export const testHooks: {
   beforeInputOpen?: (real: string) => Promise<void> | void;
   /** Input side: called right after the input file was opened, before the post-open checks. */
   afterInputOpen?: (real: string) => Promise<void> | void;
+  /** Disable the Linux-only /proc/self/fd checks, so Linux CI exercises the same checks as macOS/BSD. */
+  noProcFd?: boolean;
 } = {};
 
 /** Flags for opening an input: no symlink at the last component, and never block on a FIFO/device swapped in. */
@@ -65,6 +68,61 @@ const INPUT_FLAGS = C.O_RDONLY | (C.O_NOFOLLOW ?? 0) | (C.O_NONBLOCK ?? 0);
 
 /** Exact identity of a file (bigint stats: Windows file indexes do not fit a double). */
 const sameFile = (a: { dev: bigint; ino: bigint }, b: { dev: bigint; ino: bigint }) => a.dev === b.dev && a.ino === b.ino;
+
+/**
+ * Open `name` relative to the directory `dir` *by directory identity*, not by path (TOCTOU fix, macOS CI race):
+ * Node has no openat(), so we chdir into `dir` and open the bare name relative to the cwd. Once chdir succeeded the
+ * kernel resolves `name` inside that directory inode, so swapping `dir` (or any parent) for a symlink afterwards cannot
+ * redirect the open. process.cwd() right after chdir is the kernel's getcwd() of the directory we actually entered
+ * (macOS/Linux/Windows), so a symlink swapped in *before* chdir is visible as a cwd outside the root. chdir(".")
+ * after the open refreshes Node's cached cwd so a directory moved away during the open is seen too.
+ * Fully synchronous (no await between chdir and restore), so no other request can observe the changed cwd.
+ * `name` must be a single path component.
+ */
+function openInDir(dir: string, name: string, flags: number, mode?: number): { fd?: number; err?: unknown; cwdBefore: string; cwdAfter?: string } {
+  const prev = process.cwd();
+  let cwdBefore: string;
+  try {
+    process.chdir(dir);
+  } catch (err) {
+    return { err, cwdBefore: "" };
+  }
+  try {
+    cwdBefore = process.cwd();
+    if (gate && !gate(cwdBefore)) return { cwdBefore };
+    let fd: number;
+    try {
+      fd = openSync(name, flags, mode);
+    } catch (err) {
+      return { err, cwdBefore };
+    }
+    process.chdir(".");
+    return { fd, cwdBefore, cwdAfter: process.cwd() };
+  } finally {
+    process.chdir(prev);
+  }
+}
+/**
+ * Turn a raw fd from openInDir into a FileHandle (Node cannot wrap an fd): reopen /dev/fd/N, which on macOS dup()s the
+ * descriptor and on Linux reopens the very same open file (never a path lookup of the original name), then require
+ * the same dev/ino and close the raw fd.
+ */
+async function adoptFd(fd: number, flags: number): Promise<fs.FileHandle> {
+  try {
+    const fh = await fs.open(`/dev/fd/${fd}`, flags);
+    const [a, b] = await Promise.all([fh.stat({ bigint: true }), fs.stat(`/dev/fd/${fd}`, { bigint: true })]);
+    if (!sameFile(a, b)) {
+      await fh.close();
+      throw new Error("fd adoption mismatch");
+    }
+    return fh;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Set by openInDir callers: refuse to open when the entered directory is not acceptable. */
+let gate: ((cwd: string) => boolean) | undefined;
 
 const errnoOf = (e: unknown) => (e as NodeJS.ErrnoException | null)?.code;
 
@@ -167,8 +225,22 @@ export class PathGuard {
     await testHooks.beforeInputOpen?.(real);
     let fh: fs.FileHandle;
     try {
-      fh = await fs.open(real, INPUT_FLAGS);
+      if (process.platform === "win32") fh = await fs.open(real, INPUT_FLAGS);
+      else {
+      gate = (cwd) => this.isInside(cwd);
+      const r = openInDir(path.dirname(real), path.basename(real), INPUT_FLAGS);
+      gate = undefined;
+      if (r.err) throw r.err;
+      if (r.fd === undefined || !this.isInside(r.cwdBefore)) throw this.changed(p);
+      if (r.cwdAfter === undefined || !this.isInside(r.cwdAfter)) {
+        closeSync(r.fd);
+        throw this.changed(p);
+      }
+      fh = await adoptFd(r.fd, C.O_RDONLY | (C.O_NONBLOCK ?? 0));
+      }
     } catch (e) {
+      gate = undefined;
+      if (e instanceof UserError) throw e;
       const code = errnoOf(e);
       if (code === "ENOENT" || code === "ENOTDIR") throw this.notFound(p, abs);
       if (code === "ELOOP" || code === "EMLINK") throw this.changed(p);
@@ -198,7 +270,7 @@ export class PathGuard {
         throw new UserError(`Path "${p}" resolves (via a symlink) to a location outside the allowed root. Symlinks may only point inside ${this.root}.`, "SYMLINK_OUTSIDE_ROOT");
       }
       if (again !== real || !sameFile(now, st)) throw this.changed(p);
-      if (process.platform === "linux") {
+      if (process.platform === "linux" && !testHooks.noProcFd) {
         const actual = await fs.readlink(`/proc/self/fd/${fh.fd}`).catch(() => undefined);
         if (actual !== undefined && (actual.endsWith(" (deleted)") || !this.isInside(actual))) throw this.changed(p);
       }
@@ -288,11 +360,30 @@ export class PathGuard {
       await testHooks.beforeOpen?.(dir);
       const target = path.join(dir, name);
       let fh: fs.FileHandle;
+      let moved = false;
       try {
-        fh = await fs.open(target, flags, 0o644);
+        if (process.platform === "win32") fh = await fs.open(target, flags, 0o644);
+        else {
+          // Create relative to the directory we actually entered (see openInDir), not by path: a parent swapped for a
+          // symlink between the re-check and the open can no longer redirect the new file outside the root.
+          gate = (cwd) => cwd === dir;
+          const r = openInDir(dir, name, flags, 0o644);
+          gate = undefined;
+          if (r.err) throw r.err;
+          if (r.fd === undefined) {
+            throw new UserError(`Output directory ${dir} was replaced (now resolves to ${r.cwdBefore}) while converting. Nothing was written. Make sure nothing else modifies the folder.`, "OUTPUT_DIR_CHANGED");
+          }
+          moved = r.cwdAfter !== dir;
+          fh = await adoptFd(r.fd, C.O_WRONLY);
+        }
       } catch (e) {
+        gate = undefined;
+        if (e instanceof UserError) throw e;
         const code = (e as NodeJS.ErrnoException).code;
         if (code === "EEXIST" || code === "ELOOP") continue;
+        if (code === "ENOENT" || code === "ENOTDIR") {
+          throw new UserError(`Output directory ${dir} disappeared or was replaced while converting. Nothing was written. Make sure nothing else modifies the folder.`, "OUTPUT_DIR_CHANGED");
+        }
         throw new UserError(`Could not create output file ${target}: ${(e as Error).message}`, "WRITE_FAILED");
       }
       try {
@@ -304,7 +395,7 @@ export class PathGuard {
           // No partial data is kept (truncate via fd), but nothing is deleted by path (see leaveOwn).
           await this.leaveOwn(target, fh, e);
         }
-        await this.verifyWritten(target, fh);
+        await this.verifyWritten(target, fh, moved);
       } finally {
         await fh.close();
       }
@@ -352,7 +443,7 @@ export class PathGuard {
     }
   }
 
-  private async verifyWritten(target: string, fh: fs.FileHandle): Promise<void> {
+  private async verifyWritten(target: string, fh: fs.FileHandle, moved = false): Promise<void> {
     const st = await fh.stat();
     const isOurs = async (p: string): Promise<boolean> => {
       try {
@@ -368,7 +459,7 @@ export class PathGuard {
     } catch {
       real = undefined;
     }
-    if (real && this.isInside(real) && path.dirname(real) === path.dirname(target) && (await isOurs(real))) return;
+    if (!moved && real && this.isInside(real) && path.dirname(real) === path.dirname(target) && (await isOurs(real))) return;
 
     // The directory changed around open(): our file may be somewhere else, possibly outside the root.
     // Never unlink by path (the name can be swapped again before unlink). Empty it through the handle and report.
