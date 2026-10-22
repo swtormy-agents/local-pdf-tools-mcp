@@ -1,8 +1,11 @@
 {
   "name": "local-pdf-tools-mcp",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "description": "Local stdio MCP server for PDF merge, split, page organize and images to PDF on your own machine. No network, no telemetry.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/swtormy-agents/local-pdf-tools-mcp.git"
+  },
   "type": "module",
   "main": "dist/server.js",
   "bin": {
