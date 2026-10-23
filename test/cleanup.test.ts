@@ -123,17 +123,15 @@ describe("F7: no output left after timeout or helper crash", () => {
     const f = path.join(root, "o", "x.pdf");
     await fs.writeFile(f, "ours");
     const id = await idOf(f);
-    let atPause!: () => void;
-    const paused = new Promise<void>((r) => (atPause = r));
-    const c = cleanupOf(guard, "x.pdf", id, { testPauseMs: 400, testPauseAfterMoveMs: 600 }, (p) => p === "check" && atPause());
-    await paused;
+    let atCheck!: () => void, atMoved!: () => void;
+    const checked = new Promise<void>((r) => (atCheck = r));
+    const moved = new Promise<void>((r) => (atMoved = r));
+    const c = cleanupOf(guard, "x.pdf", id, { testPauseMs: 400, testPauseAfterMoveMs: 600 }, (p) => (p === "check" ? atCheck() : p === "moved" && atMoved()));
+    await checked; // id checked, name not yet moved aside
     await fs.rename(f, path.join(root, "ours.bak"));
     await fs.writeFile(f, "FOREIGN-1");
-    let made = false;
-    for (let i = 0; i < 300 && !made; i++) {
-      await new Promise((r) => setTimeout(r, 5));
-      made = await fs.writeFile(f, "FOREIGN-2", { flag: "wx" }).then(() => true, () => false);
-    }
+    await moved; // FOREIGN-1 is now moved aside; re-create the name before the helper restores
+    const made = await fs.writeFile(f, "FOREIGN-2", { flag: "wx" }).then(() => true, () => false);
     expect(made).toBe(true);
     const r = await c;
     expect(r.h.error).toBe("ERESTORE");
