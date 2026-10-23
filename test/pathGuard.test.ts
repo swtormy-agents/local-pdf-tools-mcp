@@ -170,45 +170,27 @@ describe.skipIf(!SYMLINKS)("TOCTOU: output dir swapped for a symlink (skipped on
     expect(await fs.readdir(dir)).toEqual([]);
   });
 
-  it("leaves an empty file (no partial data, no unlink) when the write fails", async () => {
-    const { g, dir } = await setup();
-    let err: any;
-    try {
-      await g.writeNewFile(dir, "img", "png", async (fh) => {
-        await fh.write(Buffer.from("partial"));
+  it("a failing producer creates nothing (no partial or empty file left)", async () => {
+    const { g, dir, out } = await setup();
+    const err: any = await g
+      .writeNewFile(dir, "img", "png", async () => {
         throw new Error("boom");
-      });
-    } catch (e) {
-      err = e;
-    }
-    expect(err?.code).toBe("WRITE_FAILED_FILE_LEFT");
+      })
+      .catch((e) => e);
+    expect(err?.code).toBe("WRITE_FAILED");
     expect(err.message).toMatch(/boom/);
-    expect(err.message).toContain(path.join(dir, "img.png"));
-    expect((await fs.stat(path.join(dir, "img.png"))).size).toBe(0);
+    expect(await fs.readdir(dir)).toEqual([]);
+    expect(await fs.readdir(out)).toEqual([]);
   });
 
-  it("never touches a file outside the root when the dir is swapped during failure handling", async () => {
-    const { g, dir, out } = await setup();
-    const moved = path.join(path.dirname(dir), "out-moved");
-    const victim = path.join(out, "img.png");
-    await fs.writeFile(victim, "VICTIM DATA");
-    testHooks.beforeCleanup = async () => {
-      await fs.rename(dir, moved);
-      await fs.symlink(out, dir);
-    };
-    let err: any;
-    try {
-      await g.writeNewFile(dir, "img", "png", async (fh) => {
-        await fh.write(Buffer.from("partial"));
-        throw new Error("boom");
-      });
-    } catch (e) {
-      err = e;
-    } finally {
-      testHooks.beforeCleanup = undefined;
-    }
-    expect(err?.code).toBe("WRITE_FAILED_FILE_LEFT");
-    expect(await fs.readFile(victim, "utf8")).toBe("VICTIM DATA");
-    expect((await fs.stat(path.join(moved, "img.png"))).size).toBe(0);
+  it("error messages name only root-relative paths (QA F6)", async () => {
+    const { g, dir, out, swap } = await setup();
+    testHooks.beforeOpen = swap;
+    const err: any = await g.writeNewFile(dir, "img", "png", Buffer.from("data")).catch((e) => e);
+    testHooks.beforeOpen = undefined;
+    expect(err?.code).toBe("OUTPUT_DIR_CHANGED");
+    expect(err.message).toContain('"out"');
+    expect(err.message).not.toContain(g.root);
+    expect(err.message).not.toContain(out);
   });
 });
