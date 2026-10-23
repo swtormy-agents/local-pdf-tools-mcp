@@ -38,7 +38,9 @@ export function assertPortablePath(p: string): void {
 
 function dirChanged(p: string, e: unknown): Error {
   const code = (e as NodeJS.ErrnoException)?.code;
-  if (code === "ENOENT" || code === "ENOTDIR") {
+  // Any errno while preparing a folder that was just verified (macOS reports e.g. ELOOP/EINVAL for a folder swapped
+  // mid-realpath) is a concurrent change, never an unexpected error.
+  if (code) {
     return new UserError(`Output directory "${p}" changed or disappeared while it was being prepared. Nothing was written.`, "OUTPUT_DIR_CHANGED");
   }
   return e as Error;
