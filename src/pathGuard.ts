@@ -269,8 +269,10 @@ export class PathGuard {
       if (code === "ENOENT" || code === "ENOTDIR") throw this.notFound(p, abs);
       if (code === "ELOOP" || code === "EMLINK") throw this.changed(p);
       if (code === "ENXIO" || code === "EISDIR") throw new UserError(`Input "${p}" is not a regular file.`, "INPUT_NOT_FILE");
-      // Any other errno while the verified chain no longer holds is a concurrent change, not an internal error.
-      if (code && !(await chainIntactOrEmpty(chain0))) throw this.changed(p);
+      // The path was a regular file inside the root a moment ago: any other errno from the walk/open (macOS reports
+      // e.g. EINVAL/EPERM/EACCES variants for a folder renamed or swapped mid-open) is a concurrent change. Never read.
+      void chain0;
+      if (code) throw this.changed(p);
       throw e;
     }
     try {
