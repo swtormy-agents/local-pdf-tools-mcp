@@ -88,11 +88,19 @@ function read(m) {
     return [{ ok: true }, buf.subarray(0, o)];
   } finally { fs.closeSync(fd); }
 }
+// Next free suffix per (verified folder dev:ino, base.ext), for this helper's lifetime. Without it every write probed
+// name.pdf, name-1.pdf, ... from 0 and announced each probe to the server: with thousands of outputs of the same name
+// in one folder each call cost thousands of syscalls + IPC frames (Windows folderMoves 'moves in write' at 20k calls
+// slowed down steadily to >5 s per call). O_EXCL still decides; the hint only skips names this helper already used.
+const nextFree = new Map();
 function write(m, data) {
   const ids = enter(m, false);
-  for (let i = 0; i < 10000; i++) {
+  const key = ids[ids.length - 1] + "/" + m.base + "." + m.ext;
+  for (let i = nextFree.get(key) || 0; i < 10000; i++) {
     const name = i === 0 ? m.base + "." + m.ext : m.base + "-" + i + "." + m.ext;
     let fd;
+    // A name that already exists is skipped without a create attempt (and without announcing it).
+    try { fs.lstatSync(name); continue; } catch (e) { if (e.code !== "ENOENT") throw e; }
     // N4: announce the name before creating it; if killed before the id frame, the server knows a file may exist.
     send({ progress: true, name });
     if (m.testPauseBeforeCreateMs) Atomics.wait(sab, 0, 0, m.testPauseBeforeCreateMs);
@@ -113,6 +121,8 @@ function write(m, data) {
       fs.fsyncSync(fd);
       fs.closeSync(fd); open = false;
       if (!same(name, st) || !under(ids)) throw E("ECHANGED");
+      if (nextFree.size > 10000) nextFree.clear();
+      nextFree.set(key, i + 1);
       return [{ ok: true, name }];
     } catch (e) {
       if (open) try { fs.closeSync(fd); } catch {}

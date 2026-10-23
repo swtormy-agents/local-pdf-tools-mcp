@@ -28,3 +28,27 @@ describe("helper channel: large reads are joined once", () => {
     }
   }, 60_000);
 });
+
+describe("output names: no linear re-probe per write", () => {
+  it("the 300th write of the same name announces one name, not 300 (Windows folderMoves 20k slowdown)", async () => {
+    const { testHooks } = await import("../src/pathGuard");
+    const root = await tmpRoot();
+    await fs.mkdir(path.join(root, "o"));
+    const guard = await PathGuard.create(root);
+    const dir = await guard.resolveOutputDir("o");
+    for (let k = 0; k < 299; k++) await guard.writeNewFile(dir, "x", "pdf", Buffer.from("%PDF-1.7"));
+    // A file created by someone else at the next number is still never overwritten (O_EXCL decides).
+    await fs.writeFile(path.join(root, "o", "x-299.pdf"), "FOREIGN");
+    const announced: string[] = [];
+    testHooks.onWriteProgress = (h) => { if (!h.created && h.name) announced.push(h.name); };
+    try {
+      const name = await guard.writeNewFile(dir, "x", "pdf", Buffer.from("%PDF-1.7"));
+      expect(path.basename(name)).toBe("x-300.pdf");
+    } finally {
+      testHooks.onWriteProgress = undefined;
+    }
+    expect(announced).toEqual(["x-300.pdf"]);
+    expect(await fs.readFile(path.join(root, "o", "x-299.pdf"), "utf8")).toBe("FOREIGN");
+    expect((await fs.readdir(path.join(root, "o"))).length).toBe(301);
+  }, 60_000);
+});
