@@ -1,0 +1,55 @@
+name: Race stress
+# Repeats the path-safety race tests (input TOCTOU + output dir swap) many times per OS. A single macOS run of the
+# live race once read a file outside the root (fix/input-race); this keeps such low-rate races visible.
+on:
+  push:
+    branches: [main, "fix/**"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "Race test runs per OS"
+        default: "200"
+permissions:
+  contents: read
+jobs:
+  stress:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - name: QA TOCTOU stress (inputs incl. macOS simulation, outputs), 20k calls each
+        run: npx vitest run test/toctouStress.test.ts
+        env:
+          TOCTOU_N: "20000"
+      - name: QA F9 folder moves into/out of the root, 20k calls each
+        run: npx vitest run test/folderMoves.test.ts
+        env:
+          MOVES_N: "20000"
+      - name: Race tests x N
+        shell: bash
+        env:
+          N: ${{ inputs.iterations || '200' }}
+          # Live-race loop count per test (default 400): more chances per run to hit an ABA parent swap.
+          RACE_ITER: ${{ matrix.os == 'macos-latest' && '2000' || '1000' }}
+        run: |
+          fails=0
+          for i in $(seq 1 "$N"); do
+            if ! npx vitest run test/inputRace.test.ts test/pathGuard.test.ts > race.log 2>&1; then
+              fails=$((fails+1)); echo "::error::run $i failed"; grep -E 'outsideReads|AssertionError|FAIL' race.log | head -20
+            fi
+          done
+          echo "race failures: $fails/$N"
+          test "$fails" -eq 0
