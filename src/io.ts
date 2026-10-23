@@ -1,4 +1,3 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 import { UserError } from "./errors.js";
 import { LIMITS, type Limits } from "./limits.js";
@@ -52,27 +51,20 @@ export async function readInputs(guard: PathGuard, inputs: string[], kind: Input
   checkCounts(inputs.length, limits);
   const out: LoadedFile[] = [];
   let total = 0;
-  for (const [i, name] of inputs.entries()) {
-    // Opened and identity-checked by the guard (no realpath-then-open race); read through the handle only.
-    const { real: p, fh } = await guard.openInputFile(name);
-    try {
-      const { size } = await fh.stat();
+  for (const name of inputs) {
+    // Opened, size-checked (fstat, before reading) and read by the filesystem helper relative to a verified directory;
+    // a file larger than what is left of the per-file / per-call budget is not read at all.
+    const remaining = limits.MAX_TOTAL_BYTES - total;
+    const r = await guard.readInputFile(name, Math.min(limits.MAX_FILE_BYTES, remaining));
+    if (r.tooLarge || !r.bytes) {
+      const size = r.size ?? Infinity;
       checkSizes([size], limits, [name]);
-      total += size;
-      checkSizes([total], { ...limits, MAX_FILE_BYTES: Infinity });
-      const buf = Buffer.alloc(size);
-      let off = 0;
-      while (off < size) {
-        const { bytesRead } = await fh.read(buf, off, size - off, off);
-        if (bytesRead === 0) break;
-        off += bytesRead;
-      }
-      const bytes = new Uint8Array(buf.buffer, buf.byteOffset, off);
-      if (kind === "pdf") sniffPdf(bytes, name);
-      out.push({ path: p, bytes });
-    } finally {
-      await fh.close();
+      checkSizes([total + size], { ...limits, MAX_FILE_BYTES: Infinity });
+      throw new UserError(`${name} is too large.`, "TOO_LARGE");
     }
+    total += r.bytes.byteLength;
+    if (kind === "pdf") sniffPdf(r.bytes, name);
+    out.push({ path: r.real, bytes: r.bytes });
   }
   return out;
 }

@@ -2,8 +2,8 @@
  * Megan's QA repros (qa/mcp-toctou stress.test.ts, out.test.ts, 2026-10-22) turned into assertions.
  * A separate process swaps a folder inside the root with a symlink to an outside folder in a tight loop.
  * Inputs: never the outside content (also with process.platform faked as darwin, i.e. no /proc/self/fd check).
- * Outputs: Linux creates no file outside (anchored via /proc/self/fd/<dirfd>); elsewhere at most an empty, never-written
- * file can appear outside (no openat in Node). Every reported success is inside the root.
+ * Outputs: no file is ever created outside the root (the helper creates relative to a verified cwd, anchor.ts), on every
+ * platform. Every reported success is inside the root.
  * TOCTOU_N scales the call count (CI stress job uses more).
  */
 import { spawn } from "node:child_process";
@@ -85,7 +85,7 @@ describe.skipIf(realPlatform === "win32")("TOCTOU stress (QA repro, symlinks nee
       const isDir = (p: string) => fs.lstat(p).then((s) => s.isDirectory(), () => false);
       const real = (await isDir(dir)) ? dir : dir + "_real";
       const leaked = await fs.readdir(outside);
-      if (!sim && realPlatform === "linux") expect(leaked, JSON.stringify(res)).toEqual([]);
+      expect(leaked, JSON.stringify(res)).toEqual([]);
       {
         // Without openat()/chdir (unavailable in Node / process-global) a parent swap at the exact open can still
         // create an EMPTY file outside off Linux: the fd is verified before any byte is written, so it is never written

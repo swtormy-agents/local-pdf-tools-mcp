@@ -20,7 +20,6 @@ const SYMLINKS = process.platform !== "win32";
 afterEach(() => {
   testHooks.beforeInputOpen = undefined;
   testHooks.afterInputOpen = undefined;
-  testHooks.noProcFd = undefined;
   testHooks.inputStep = undefined;
 });
 
@@ -66,32 +65,22 @@ describe.skipIf(!SYMLINKS)("input TOCTOU: folder swapped for a symlink to outsid
     };
     await expect(readInputs(guard, ["rin/doc.pdf"], "pdf")).rejects.toMatchObject({ code: "PATH_CHANGED" });
   });
-  // The macOS CI outsideReads:1 window, made deterministic: every name-based check lands in the phase that agrees with
-  // the outside fd (stat after realpath, open, lstat) and the chain checks land in the genuine phase. Only the
-  // inode-relative anchored lookup (anchor.ts) tells the outside fd apart from the in-root entry.
-  for (const noProc of [true, false]) it(`ABA parent swap timed around every name-based check is rejected${noProc ? " (no /proc)" : ""}`, async () => {
+  // The old macOS CI outsideReads:1 window: the folder is a symlink to outside when the helper starts and is
+  // swapped back right after. The helper walks relative to verified directories, so it refuses the symlink.
+  it("parent swapped for a symlink after the realpath check and back after the helper ran: rejected", async () => {
     const { guard, swapToOutside, swapBack } = await setup();
-    testHooks.noProcFd = noProc;
-    const plan: Record<string, () => Promise<void>> = {
-      afterRealpath: swapToOutside,
-      beforeWalk: swapBack,
-      beforeOpen: swapToOutside,
-      beforeRealpathAgain: swapBack,
-      beforeLstatAgain: swapToOutside,
-      beforeChainCheck: swapBack,
-    };
     const steps: string[] = [];
     testHooks.inputStep = async (s) => {
       steps.push(s);
-      await plan[s]?.();
+      if (s === "beforeHelper") await swapToOutside();
     };
+    testHooks.afterInputOpen = swapBack;
     const r = await readInputs(guard, ["rin/doc.pdf"], "pdf").then(
       (f) => Buffer.from(f[0].bytes).toString(),
       (e) => e,
     );
-    expect(r).not.toBe("%PDF-1.7 OUTSIDE SECRET");
-    if (process.platform === "linux" || noProc) expect(r).toMatchObject({ code: "PATH_CHANGED" });
-    if (noProc) expect(steps).toEqual(Object.keys(plan));
+    expect(r).toMatchObject({ code: "PATH_CHANGED" });
+    expect(steps).toEqual(["afterRealpath", "beforeHelper"]);
   });
   it.skipIf(process.platform === "win32")("a FIFO swapped in never blocks the read", async () => {
     const { root, guard } = await setup();
@@ -167,9 +156,8 @@ const codeOf = (r: any) => /\[([A-Z_]+)\]$/.exec(r.content[0].text)?.[1] ?? `NO_
 // what macOS runs (the macOS CI failure, outsideReads 1, came from that path). RACE_ITER raises the loop count.
 const ITER = Number(process.env.RACE_ITER ?? 400);
 describe.skipIf(!SYMLINKS)("live race (poc/race.mjs, in mode)", () => {
-  for (const noProc of [false, true]) {
-    it(`never reads the outside file; every failure has a code${noProc ? " (no /proc, macOS-equivalent)" : ""}`, async () => {
-      testHooks.noProcFd = noProc;
+  {
+    it("never reads the outside file; every failure has a code", async () => {
       const { root, outside } = await setup();
       await fs.writeFile(path.join(root, "rin", "doc.pdf"), await fx.plainPdf(3));
       await fs.writeFile(path.join(outside, "doc.pdf"), await fx.plainPdf(1));
@@ -195,8 +183,7 @@ describe.skipIf(!SYMLINKS)("live race (poc/race.mjs, in mode)", () => {
 
   // Output side of the same race: root/out is swapped with a symlink to an outside folder while pdf_merge writes.
   // Nothing may ever be created outside the root, and a reported success must name a file that is inside.
-  for (const noProc of [false, true]) it(`never writes outside the root while outputDir is being swapped (out mode)${noProc ? " (no /proc)" : ""}`, async () => {
-    testHooks.noProcFd = noProc;
+  it("never creates anything outside the root while outputDir is being swapped (out mode)", async () => {
     const { root, outside } = await setup();
     await fs.writeFile(path.join(root, "rin", "doc.pdf"), await fx.plainPdf(2));
     await fs.mkdir(path.join(root, "out"));
@@ -211,21 +198,19 @@ describe.skipIf(!SYMLINKS)("live race (poc/race.mjs, in mode)", () => {
       }
       swapper.kill();
       const leaked = (await fs.readdir(outside)).filter((f) => f !== "doc.pdf");
-      // No openat()/chdir off Linux: an EMPTY file may be created outside at the exact open, but the fd is verified
-      // before any byte is written, so it stays empty and is never a success. Linux anchors via /proc/self/fd.
-      if (process.platform === "linux" && !testHooks.noProcFd) expect(leaked, JSON.stringify(res)).toEqual([]);
+      // The helper creates relative to a verified cwd: not even an empty file may appear outside (QA F1).
+      expect(leaked, JSON.stringify(res)).toEqual([]);
       for (const f of leaked) expect((await fs.stat(path.join(outside, f))).size, f).toBe(0);
-      for (const code of Object.keys(res.codes)) expect(["OUTPUT_DIR_CHANGED", "OUTPUT_DIR_CHANGED_FILE_LEFT", "SYMLINK_OUTSIDE_ROOT", "PATH_CHANGED", "DIR_NOT_FOUND", "NOT_DIR"], JSON.stringify(res)).toContain(code);
+      for (const code of Object.keys(res.codes)) expect(["OUTPUT_DIR_CHANGED", "SYMLINK_OUTSIDE_ROOT", "PATH_CHANGED", "DIR_NOT_FOUND", "NOT_DIR"], JSON.stringify(res)).toContain(code);
     } finally {
       swapper.kill();
     }
   }, 120_000);
 
   // Megan's re-QA: many tool calls in flight at once (async interleaving at every await) while both the input and the
-  // output folder are swapped. Path resolution has no process-global state (no chdir), so parallel calls must keep
+  // output folder are swapped. The server process has no process-global state (no chdir; only the serialized helper chdirs), so parallel calls must keep
   // every invariant: no outside read, no data written outside, every success inside, every failure coded, cwd intact.
-  for (const noProc of [false, true]) it(`parallel tool calls under concurrent symlink swaps${noProc ? " (no /proc)" : ""}`, async () => {
-    testHooks.noProcFd = noProc;
+  it("parallel tool calls under concurrent symlink swaps", async () => {
     const { root, outside } = await setup();
     await fs.writeFile(path.join(root, "rin", "doc.pdf"), await fx.plainPdf(3));
     await fs.writeFile(path.join(outside, "doc.pdf"), await fx.plainPdf(1));
@@ -263,8 +248,8 @@ describe.skipIf(!SYMLINKS)("live race (poc/race.mjs, in mode)", () => {
     const leaked = (await fs.readdir(outside)).filter((f) => f !== "doc.pdf");
     for (const f of leaked) expect((await fs.stat(path.join(outside, f))).size, f).toBe(0);
     for (const f of okFiles) expect(leaked).not.toContain(f);
-    if (process.platform === "linux" && !noProc) expect(leaked, JSON.stringify(res)).toEqual([]);
-    const allowed = ["INPUT_NOT_FOUND", "SYMLINK_OUTSIDE_ROOT", "PATH_CHANGED", "INPUT_NOT_FILE", "OUTPUT_DIR_CHANGED", "OUTPUT_DIR_CHANGED_FILE_LEFT", "DIR_NOT_FOUND", "NOT_DIR"];
+    expect(leaked, JSON.stringify(res)).toEqual([]);
+    const allowed = ["INPUT_NOT_FOUND", "SYMLINK_OUTSIDE_ROOT", "PATH_CHANGED", "INPUT_NOT_FILE", "OUTPUT_DIR_CHANGED", "DIR_NOT_FOUND", "NOT_DIR"];
     for (const code of Object.keys(res.codes)) expect(allowed, JSON.stringify(res)).toContain(code);
   }, 300_000);
 });
