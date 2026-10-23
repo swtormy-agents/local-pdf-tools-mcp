@@ -1,4 +1,3 @@
-import { constants as C } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { assertSafeRoot } from "./config.js";
@@ -36,46 +35,48 @@ export function assertPortablePath(p: string): void {
   }
 }
 
-function dirChanged(p: string, e: unknown): Error {
-  const code = (e as NodeJS.ErrnoException)?.code;
-  if (code === "ENOENT" || code === "ENOTDIR") {
-    return new UserError(`Output directory "${p}" changed or disappeared while it was being prepared. Nothing was written.`, "OUTPUT_DIR_CHANGED");
-  }
-  return e as Error;
-}
+import { fsCall, identKey, withFsTimeout, type FsHeader } from "./anchor.js";
 
 /** Test-only hooks to simulate races (e.g. swapping a directory for a symlink). Never set in production. */
 export const testHooks: {
-  /** Called after output dir resolution, before the pre-write re-check (simulates a slow decode). */
+  /** Called after output dir resolution, before the data is produced and sent to the helper (slow decode). */
   beforeWrite?: (dir: string) => Promise<void> | void;
-  /** Called after the pre-write re-check, immediately before open() (simulates the tightest race). */
+  /** Called immediately before the helper creates the output file (tightest race on the server side). */
   beforeOpen?: (dir: string) => Promise<void> | void;
-  /** Called right after open(), before writing (e.g. to swap the directory back). */
+  /** Called after the helper request finished (success or failure), e.g. to swap a directory back. */
   afterOpen?: (dir: string) => Promise<void> | void;
-  /** Called after a failed write, after truncation and before the file is located for the error message. */
-  beforeCleanup?: (dir: string) => Promise<void> | void;
-  /** Input side: called after the realpath/stat check, immediately before the input file is opened. */
+  /** Input side: called after the realpath/stat check, immediately before the helper opens the input. */
   beforeInputOpen?: (real: string) => Promise<void> | void;
-  /** Input side: called right after the input file was opened, before the post-open checks. */
+  /** Extra fields for helper write/cleanup requests (testSlowMs, testPauseMs). */
+  writeExtra?: Record<string, unknown>;
+  cleanupExtra?: Record<string, unknown>;
+  onWriteProgress?: (h: FsHeader) => void;
+  /** Input side: called after the helper request finished. */
   afterInputOpen?: (real: string) => Promise<void> | void;
+  /** Input side: called at named steps ("afterRealpath", "beforeHelper"). */
+  inputStep?: (step: string) => Promise<void> | void;
 } = {};
 
-/** Flags for opening an input: no symlink at the last component, and never block on a FIFO/device swapped in. */
-const INPUT_FLAGS = C.O_RDONLY | (C.O_NOFOLLOW ?? 0) | (C.O_NONBLOCK ?? 0);
-
-/** Exact identity of a file (bigint stats: Windows file indexes do not fit a double). */
-const sameFile = (a: { dev: bigint; ino: bigint }, b: { dev: bigint; ino: bigint }) => a.dev === b.dev && a.ino === b.ino;
-
-const errnoOf = (e: unknown) => (e as NodeJS.ErrnoException | null)?.code;
+/** Error codes of the helper that mean "a file or folder on the way was replaced/moved concurrently". */
+const RACE_CODES = new Set(["ELOOP", "ECHANGED", "ENOENT", "ENOTDIR"]);
+/** Genuine "cannot write here" errors. */
+const WRITE_CODES = new Set(["EACCES", "EPERM", "ENOSPC", "EROFS", "EDQUOT", "EMFILE", "ENFILE", "EFBIG", "EIO"]);
 
 /**
  * Restricts all file access to one allowed root directory.
- * - Relative paths are resolved against the root.
- * - ".." traversal and absolute paths outside the root are rejected.
- * - Symlinks are resolved with realpath; a link that points outside the root is rejected.
+ * - Relative paths are resolved against the root; ".." traversal and absolute paths outside the root are rejected
+ *   lexically before any I/O.
+ * - Symlinks are resolved with realpath first; a link that points outside the root is rejected.
+ * - Every open/create/mkdir under the root then runs in the filesystem helper (anchor.ts), relative to a directory
+ *   verified component by component (no symlinks/junctions, dev/ino linked from the root): nothing outside the root
+ *   is read or created, even if a folder is swapped at any moment.
+ * Error messages name paths relative to the root only (never the absolute root or a location outside it).
  */
 export class PathGuard {
-  private constructor(public readonly root: string) {}
+  private constructor(
+    public readonly root: string,
+    private readonly rootId: string,
+  ) {}
 
   static async create(root: string): Promise<PathGuard> {
     let real: string;
@@ -84,15 +85,26 @@ export class PathGuard {
     } catch {
       throw new UserError(`Allowed root directory does not exist: ${root}. Set --root or LOCAL_PDF_TOOLS_ROOT to an existing directory.`, "ROOT_MISSING");
     }
-    const st = await fs.stat(real);
+    const st = await withFsTimeout(fs.stat(real, { bigint: true }));
     if (!st.isDirectory()) throw new UserError(`Allowed root is not a directory: ${root}.`, "ROOT_NOT_DIR");
     assertSafeRoot(real);
-    return new PathGuard(real);
+    return new PathGuard(real, identKey(st));
   }
 
   isInside(p: string): boolean {
     const rel = path.relative(this.root, p);
     return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  }
+
+  /** Root-relative display form ("." for the root, "/" separators) for messages. */
+  private show(abs: string): string {
+    const r = path.relative(this.root, abs);
+    return r === "" ? "." : r.split(path.sep).join("/");
+  }
+
+  private partsOf(dir: string): string[] {
+    const r = path.relative(this.root, dir);
+    return r === "" ? [] : r.split(path.sep);
   }
 
   private lexical(p: string): string {
@@ -101,24 +113,23 @@ export class PathGuard {
     assertPortablePath(p);
     const abs = path.resolve(this.root, p);
     if (!this.isInside(abs)) {
-      throw new UserError(`Path "${p}" is outside the allowed root (${this.root}). Use a path inside it, or restart the server with a different --root.`, "PATH_OUTSIDE_ROOT");
+      throw new UserError(`Path "${p}" is outside the allowed root. Use a path relative to the allowed root, or restart the server with a different --root.`, "PATH_OUTSIDE_ROOT");
     }
     return abs;
   }
 
   private async real(abs: string, original: string): Promise<string> {
-    const real = await fs.realpath(abs);
+    const real = await withFsTimeout(fs.realpath(abs));
     if (!this.isInside(real)) {
-      throw new UserError(`Path "${original}" resolves (via a symlink) to a location outside the allowed root. Symlinks may only point inside ${this.root}.`, "SYMLINK_OUTSIDE_ROOT");
+      throw new UserError(`Path "${original}" resolves (via a symlink) to a location outside the allowed root. Symlinks may only point inside the allowed root.`, "SYMLINK_OUTSIDE_ROOT");
     }
     return real;
   }
 
-  private notFound(p: string, abs: string): UserError {
-    return new UserError(`Input file not found: "${p}" (looked in ${abs}).`, "INPUT_NOT_FOUND");
+  private notFound(p: string): UserError {
+    return new UserError(`Input file not found: "${p}".`, "INPUT_NOT_FOUND");
   }
 
-  /** The checked path no longer names the file that was opened (dev/ino mismatch, symlink swapped in). */
   private changed(p: string): UserError {
     return new UserError(
       `Input "${p}" changed while it was being opened (the file, a symlink or a folder in its path was replaced). It was not read. Make sure nothing else modifies the folder and try again.`,
@@ -126,86 +137,84 @@ export class PathGuard {
     );
   }
 
-  /** Resolve an existing regular file for reading (path checks only; read through openInputFile). */
+  /** `after` describes what is known about side effects (reads/mkdir: nothing written; writes: cleanup result). */
+  private helperFailed(e: unknown, what: string, after = "No output file was created."): UserError {
+    const code = (e as NodeJS.ErrnoException)?.code;
+    if (code === "FS_TIMEOUT") return new UserError(`${what} timed out (the filesystem did not answer within the time limit). The request was not completed. ${after}`, "FS_TIMEOUT");
+    return new UserError(`${what} failed: the filesystem helper process stopped unexpectedly. The request was not completed. ${after} Try again.`, "FS_HELPER_FAILED");
+  }
+
+  /** Resolve an existing regular file for reading (path checks only; read through readInputFile). */
   async resolveInputFile(p: string): Promise<string> {
     return (await this.checkInputFile(p)).real;
   }
 
   /** realpath inside the root + stat (bigint identity) of an input that must be a regular file. */
-  private async checkInputFile(p: string): Promise<{ abs: string; real: string; st: import("node:fs").BigIntStats }> {
+  private async checkInputFile(p: string): Promise<{ real: string; st: import("node:fs").BigIntStats }> {
     const abs = this.lexical(p);
     let real: string;
     let st: import("node:fs").BigIntStats;
     try {
       real = await this.real(abs, p);
-      st = await fs.stat(real, { bigint: true });
+      await testHooks.inputStep?.("afterRealpath");
+      st = await withFsTimeout(fs.stat(real, { bigint: true }));
     } catch (e) {
       if (e instanceof UserError) throw e;
-      throw this.notFound(p, abs);
+      if ((e as NodeJS.ErrnoException)?.code === "FS_TIMEOUT") throw this.helperFailed(e, `Checking "${p}"`, "Nothing was read or written.");
+      throw this.notFound(p);
     }
     if (!st.isFile()) throw new UserError(`Input "${p}" is not a regular file.`, "INPUT_NOT_FILE");
-    return { abs, real, st };
+    return { real, st };
   }
 
   /**
-   * Open an input file for reading without a check-then-use race (QA M1):
-   * 1. realpath must be inside the root; stat it (identity S1, must be a regular file);
-   * 2. open that real path with O_RDONLY|O_NOFOLLOW|O_NONBLOCK (no symlink at the last component; a FIFO swapped in
-   *    cannot block us);
-   * 3. fstat the handle: it must be a regular file with nlink 1 (a hard link can point at a file outside the root)
-   *    and the same dev/ino as S1;
-   * 4. realpath the original path again: still inside the root, and lstat of it has the same dev/ino as the handle;
-   *    on Linux the handle's own path (/proc/self/fd/N) must also be inside the root.
-   * Any mismatch rejects the input; the caller reads through the returned handle only. Codes: PATH_CHANGED for a hard
-   * link (nlink > 1), a dev/ino mismatch or a symlink swapped in at the last component (ELOOP); SYMLINK_OUTSIDE_ROOT
-   * if the path now resolves outside the root; INPUT_NOT_FOUND if it vanished (ENOENT); INPUT_NOT_FILE for a non-file.
-   * Windows has no O_NOFOLLOW: the open may follow a link at the last component, but steps 3-4 still compare the
-   * opened file with the checked path, so a swapped link is rejected after the open instead of at it.
+   * Read an input file without a check-then-use race. realpath (inside the root) and stat give the expected identity;
+   * the helper then opens the last component relative to the verified directory with O_RDONLY|O_NOFOLLOW|O_NONBLOCK,
+   * requires a regular file with nlink 1 and the expected dev/ino, enforces `maxBytes` (from fstat, before reading;
+   * -1 = no limit) and re-verifies the entry and the directory chain after reading. Returns `{ tooLarge, size }`
+   * instead of bytes when the file exceeds `maxBytes`.
    */
-  async openInputFile(p: string): Promise<{ real: string; fh: fs.FileHandle }> {
-    const { abs, real, st: before } = await this.checkInputFile(p);
-    await testHooks.beforeInputOpen?.(real);
-    let fh: fs.FileHandle;
+  async readInputFile(p: string, maxBytes: number): Promise<{ real: string; bytes?: Uint8Array; tooLarge?: boolean; size?: number }> {
+    const { real, st } = await this.checkInputFile(p);
+    let r;
     try {
-      fh = await fs.open(real, INPUT_FLAGS);
-    } catch (e) {
-      const code = errnoOf(e);
-      if (code === "ENOENT" || code === "ENOTDIR") throw this.notFound(p, abs);
-      if (code === "ELOOP" || code === "EMLINK") throw this.changed(p);
-      if (code === "ENXIO" || code === "EISDIR") throw new UserError(`Input "${p}" is not a regular file.`, "INPUT_NOT_FILE");
-      throw e;
-    }
-    try {
+      await testHooks.beforeInputOpen?.(real);
+      await testHooks.inputStep?.("beforeHelper");
+      r = await fsCall({
+        op: "read",
+        root: this.root,
+        rootId: this.rootId,
+        parts: this.partsOf(path.dirname(real)),
+        name: path.basename(real),
+        expect: identKey(st),
+        max: Number.isFinite(maxBytes) ? maxBytes : -1,
+      }).catch((e) => {
+        throw this.helperFailed(e, `Reading "${p}"`, "Nothing was written.");
+      });
+    } finally {
       await testHooks.afterInputOpen?.(real);
-      const st = await fh.stat({ bigint: true });
-      if (!st.isFile()) throw new UserError(`Input "${p}" is not a regular file.`, "INPUT_NOT_FILE");
-      if (st.nlink > 1n) {
+    }
+    const h: FsHeader = r.h;
+    if (!h.error) return { real, bytes: new Uint8Array(r.p.buffer, r.p.byteOffset, r.p.byteLength) };
+    switch (h.error) {
+      case "ETOOLARGE":
+        return { real, tooLarge: true, size: h.size };
+      case "ENOENT":
+      case "ENOTDIR":
+        throw this.notFound(p);
+      case "ENOTFILE":
+      case "EISDIR":
+      case "ENXIO":
+        throw new UserError(`Input "${p}" is not a regular file.`, "INPUT_NOT_FILE");
+      case "EHARDLINK":
         throw new UserError(
-          `Input "${p}" is a hard link (${st.nlink} names for the same file). Hard links can point at files outside the allowed root, so they are refused. Copy the file into ${this.root} instead.`,
+          `Input "${p}" is a hard link (${h.nlink} names for the same file). Hard links can point at files outside the allowed root, so they are refused. Copy the file into the allowed root instead.`,
           "PATH_CHANGED",
         );
-      }
-      if (!sameFile(st, before)) throw this.changed(p);
-      let again: string;
-      let now: import("node:fs").BigIntStats;
-      try {
-        again = await fs.realpath(abs);
-        now = await fs.lstat(again, { bigint: true });
-      } catch {
+      default:
+        // ELOOP (symlink/junction on the way or at the name), ECHANGED (identity or chain changed), or any other errno
+        // while a file that was just checked is opened: a concurrent change. Nothing was returned.
         throw this.changed(p);
-      }
-      if (!this.isInside(again)) {
-        throw new UserError(`Path "${p}" resolves (via a symlink) to a location outside the allowed root. Symlinks may only point inside ${this.root}.`, "SYMLINK_OUTSIDE_ROOT");
-      }
-      if (again !== real || !sameFile(now, st)) throw this.changed(p);
-      if (process.platform === "linux") {
-        const actual = await fs.readlink(`/proc/self/fd/${fh.fd}`).catch(() => undefined);
-        if (actual !== undefined && (actual.endsWith(" (deleted)") || !this.isInside(actual))) throw this.changed(p);
-      }
-      return { real, fh };
-    } catch (e) {
-      await fh.close();
-      throw e;
     }
   }
 
@@ -217,27 +226,35 @@ export class PathGuard {
       real = await this.real(abs, p);
     } catch (e) {
       if (e instanceof UserError) throw e;
+      if ((e as NodeJS.ErrnoException)?.code === "FS_TIMEOUT") throw this.helperFailed(e, `Checking "${p}"`, "Nothing was read or written.");
       throw new UserError(`Directory not found: "${p}".`, "DIR_NOT_FOUND");
     }
-    const st = await fs.stat(real);
+    const st = await withFsTimeout(fs.stat(real)).catch((e) => {
+      throw this.helperFailed(e, `Checking "${p}"`, "Nothing was read or written.");
+    });
     if (!st.isDirectory()) throw new UserError(`"${p}" is not a directory.`, "NOT_DIR");
     return real;
   }
 
+  private dirChanged(p: string): UserError {
+    return new UserError(`Output directory "${p}" changed or disappeared while it was being prepared. Nothing was written.`, "OUTPUT_DIR_CHANGED");
+  }
+
   /**
-   * Resolve (and create if needed) an output directory inside the root.
-   * Each existing ancestor is checked with realpath so a symlinked parent cannot escape.
+   * Resolve (and create if needed) an output directory inside the root. The deepest existing ancestor is resolved
+   * with realpath (must be inside the root); missing folders are created by the helper, one relative mkdir at a time
+   * inside a verified directory, so a swapped parent cannot make it create a folder outside the root.
    */
   async resolveOutputDir(p: string): Promise<string> {
     const abs = this.lexical(p);
-    // Find the deepest existing ancestor and verify it.
     let cur = abs;
     const missing: string[] = [];
     for (;;) {
       try {
-        await fs.lstat(cur);
+        await withFsTimeout(fs.lstat(cur));
         break;
-      } catch {
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException)?.code === "FS_TIMEOUT") throw this.helperFailed(e, `Checking output directory "${p}"`, "Nothing was written.");
         missing.unshift(path.basename(cur));
         const parent = path.dirname(cur);
         if (parent === cur) break;
@@ -248,138 +265,94 @@ export class PathGuard {
     let st: import("node:fs").Stats;
     try {
       realBase = await this.real(cur, p);
-      st = await fs.stat(realBase);
+      st = await withFsTimeout(fs.stat(realBase));
     } catch (e) {
       if (e instanceof UserError) throw e;
-      throw dirChanged(p, e);
+      if ((e as NodeJS.ErrnoException)?.code === "FS_TIMEOUT") throw this.helperFailed(e, `Checking output directory "${p}"`, "Nothing was written.");
+      throw this.dirChanged(p);
     }
     if (!st.isDirectory()) throw new UserError(`Output path "${p}" is not a directory.`, "OUTPUT_NOT_DIR");
-    let out = realBase;
-    for (const seg of missing) {
-      out = path.join(out, seg);
-      try {
-        await fs.mkdir(out).catch((e: NodeJS.ErrnoException) => {
-          if (e.code !== "EEXIST") throw e;
-        });
-        out = await this.real(out, p);
-      } catch (e) {
-        if (e instanceof UserError) throw e;
-        throw dirChanged(p, e);
+    const out = path.join(realBase, ...missing);
+    if (missing.length === 0) return out;
+    const r = await fsCall({ op: "mkdirs", root: this.root, rootId: this.rootId, parts: this.partsOf(out) }).catch((e) => {
+      throw this.helperFailed(e, `Creating output directory "${p}"`, "Some of the missing folders may already have been created (empty); no file was written.");
+    });
+    if (r.h.error) {
+      if (WRITE_CODES.has(r.h.error) && !RACE_CODES.has(r.h.error)) {
+        throw new UserError(`Could not create output directory "${p}" (${r.h.error}).`, "WRITE_FAILED");
       }
+      throw this.dirChanged(p);
     }
     return out;
   }
 
   /**
-   * Write `data` to a new file `<base>[-N].<ext>` in `dir` without overwriting anything and without escaping the root,
-   * even if `dir` (or a parent) is swapped for a symlink while we work:
-   * 1. right before opening, realpath(dir) again and require it to be unchanged and inside the root;
-   * 2. open with O_CREAT|O_EXCL|O_NOFOLLOW (never follows a symlink at the target, never overwrites);
-   * 3. after writing, realpath the new file and compare its device/inode with the open handle (fstat);
-   *    if it is not the file we created inside the root, delete what we wrote and fail.
+   * Write `data` to a new file `<base>[-N].<ext>` in `dir` (a directory returned by resolveOutputDir) without
+   * overwriting anything and without creating anything outside the root. The helper enters `dir` component by
+   * component (verified), creates the file relative to it with O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW, re-verifies the
+   * entry and the chain before and after writing, writes, fsyncs and closes. On any failure it removes its own new
+   * file by relative name in the same verified directory (only if that name is still its inode), so no partial or
+   * empty output is left behind. `data` may be a producer; if it throws, nothing is created.
    */
-  async writeNewFile(dir: string, base: string, ext: string, data: Buffer | ((fh: fs.FileHandle) => Promise<void>)): Promise<string> {
+  async writeNewFile(dir: string, base: string, ext: string, data: Uint8Array | (() => Promise<Uint8Array> | Uint8Array)): Promise<string> {
     if (isWindowsReserved(base)) base = `_${base}`;
+    const shown = this.isInside(dir) ? this.show(dir) : "(output directory)";
     await testHooks.beforeWrite?.(dir);
-    const flags = C.O_WRONLY | C.O_CREAT | C.O_EXCL | (C.O_NOFOLLOW ?? 0);
-    for (let i = 0; i < 10000; i++) {
-      const name = i === 0 ? `${base}.${ext}` : `${base}-${i}.${ext}`;
-      await this.assertDirUnchanged(dir);
+    let bytes: Uint8Array;
+    try {
+      bytes = typeof data === "function" ? await data() : data;
+    } catch (e) {
+      throw new UserError(`Producing the output failed (${e instanceof Error ? e.message : String(e)}). Nothing was written.`, "WRITE_FAILED");
+    }
+    if (!this.isInside(dir)) throw new UserError(`Output directory ${shown} is outside the allowed root. Nothing was written.`, "OUTPUT_DIR_CHANGED");
+    let r;
+    try {
       await testHooks.beforeOpen?.(dir);
-      const target = path.join(dir, name);
-      let fh: fs.FileHandle;
-      try {
-        fh = await fs.open(target, flags, 0o644);
-      } catch (e) {
-        const code = (e as NodeJS.ErrnoException).code;
-        if (code === "EEXIST" || code === "ELOOP") continue;
-        throw new UserError(`Could not create output file ${target}: ${(e as Error).message}`, "WRITE_FAILED");
-      }
-      try {
-        await testHooks.afterOpen?.(dir);
-        try {
-          if (typeof data === "function") await data(fh);
-          else await fh.writeFile(data);
-        } catch (e) {
-          // No partial data is kept (truncate via fd), but nothing is deleted by path (see leaveOwn).
-          await this.leaveOwn(target, fh, e);
+      const parts = this.partsOf(dir);
+      let announced: string | undefined;
+      let created: { name: string; id: string } | undefined;
+      r = await fsCall({ op: "write", root: this.root, rootId: this.rootId, parts, base, ext, ...testHooks.writeExtra }, bytes, (h) => {
+        if (h.created) created = { name: h.name!, id: h.id! };
+        else announced = h.name;
+        testHooks.onWriteProgress?.(h);
+      }).catch(async (e) => {
+        if (!created) {
+          // N4: killed between announcing and confirming the create: we cannot prove a file there is ours, so it is
+          // never deleted.
+          throw this.helperFailed(
+            e,
+            `Writing to "${shown}"`,
+            announced ? `An empty file "${shown}/${announced}" may remain (it was not removed because it could not be verified as this server's file); delete it manually if present.` : undefined,
+          );
         }
-        await this.verifyWritten(target, fh);
-      } finally {
-        await fh.close();
-      }
-      return target;
+        // F7: a fresh helper removes `created.name` only if it is still the inode the killed helper created.
+        const where = `"${shown}/${created.name}"`;
+        const c = await fsCall({ op: "cleanup", root: this.root, rootId: this.rootId, parts, ...created, ...testHooks.cleanupExtra }).catch(
+          (e2: NodeJS.ErrnoException) => ({ h: { error: e2.code ?? "EHELPER" } as FsHeader }),
+        );
+        const err = c.h.error;
+        throw this.helperFailed(
+          e,
+          `Writing to "${shown}"`,
+          !err
+            ? "The partially written output file was removed."
+            : err === "ENOLINKSUPPORT"
+              ? `The partially written file ${where} may remain: this filesystem has no hard links, which the safe cleanup needs, so it was not touched; delete it manually.`
+              : err === "ERESTORE"
+                ? `The file at ${where} had been replaced by another file, which could not be put back because the name is taken again (${c.h.cause}); it was kept as "${shown}/${c.h.tmp}". Nothing was deleted; check both files.`
+                : `The partially written file ${where} could not be removed (${err}) and may remain; delete it manually${err === "EHELPER" || err === "FS_TIMEOUT" ? ` (an empty temporary file "${shown}/.lpt-cleanup-..." may also remain)` : ""}.`,
+        );
+      });
+    } finally {
+      await testHooks.afterOpen?.(dir);
     }
-    throw new UserError(`Too many existing files named ${base}-N.${ext} in ${dir}.`, "WRITE_FAILED");
-  }
-
-  /** Best-effort current location of an open file (Linux: /proc/self/fd), for error messages only. Never used to delete. */
-  private async locate(fh: fs.FileHandle, fallback: string): Promise<string> {
-    if (process.platform === "linux") {
-      try {
-        return (await fs.readlink(`/proc/self/fd/${fh.fd}`)).replace(/ \(deleted\)$/, "");
-      } catch {
-        /* /proc not available */
-      }
-    }
-    return fallback;
-  }
-
-  /**
-   * After a failed write: never unlink anything by path (a name can be swapped between any check and the unlink).
-   * Truncate through the open handle so no partial data remains, then report where the empty file is.
-   */
-  private async leaveOwn(target: string, fh: fs.FileHandle, cause: unknown): Promise<never> {
-    await fh.truncate(0).catch(() => undefined);
-    await testHooks.beforeCleanup?.(path.dirname(target));
-    const where = await this.locate(fh, target);
-    const why = cause instanceof Error ? cause.message : String(cause);
+    const err = r.h.error;
+    if (!err) return path.join(dir, r.h.name!);
+    if (err === "EEXHAUST") throw new UserError(`Too many existing files named ${base}-N.${ext} in "${shown}".`, "WRITE_FAILED");
+    if (WRITE_CODES.has(err)) throw new UserError(`Could not write the output file in "${shown}" (${err}). Nothing was left behind.`, "WRITE_FAILED");
     throw new UserError(
-      `Writing the output failed (${why}). An empty output file was left at ${where}; it was not deleted automatically. Delete it if you do not need it.`,
-      "WRITE_FAILED_FILE_LEFT",
+      `Output directory "${shown}" disappeared or was replaced while writing. Nothing was written and no file was left behind. Make sure nothing else modifies the folder.`,
+      "OUTPUT_DIR_CHANGED",
     );
   }
-
-  private async assertDirUnchanged(dir: string): Promise<void> {
-    let real: string;
-    try {
-      real = await fs.realpath(dir);
-    } catch {
-      throw new UserError(`Output directory ${dir} disappeared while converting. Nothing was written.`, "OUTPUT_DIR_CHANGED");
-    }
-    if (real !== dir || !this.isInside(real)) {
-      throw new UserError(`Output directory ${dir} was replaced (now resolves to ${real}) while converting. Nothing was written. Make sure nothing else modifies the folder.`, "OUTPUT_DIR_CHANGED");
-    }
-  }
-
-  private async verifyWritten(target: string, fh: fs.FileHandle): Promise<void> {
-    const st = await fh.stat();
-    const isOurs = async (p: string): Promise<boolean> => {
-      try {
-        const now = await fs.lstat(p);
-        return now.isFile() && now.dev === st.dev && now.ino === st.ino;
-      } catch {
-        return false;
-      }
-    };
-    let real: string | undefined;
-    try {
-      real = await fs.realpath(target);
-    } catch {
-      real = undefined;
-    }
-    if (real && this.isInside(real) && path.dirname(real) === path.dirname(target) && (await isOurs(real))) return;
-
-    // The directory changed around open(): our file may be somewhere else, possibly outside the root.
-    // Never unlink by path (the name can be swapped again before unlink). Empty it through the handle and report.
-    await fh.truncate(0).catch(() => undefined);
-    const where = process.platform === "linux" ? await this.locate(fh, "") : "";
-    throw new UserError(
-      where
-        ? `Output directory changed during the write. An empty file was left at ${where} (possibly outside ${this.root}); it was not deleted automatically. Check what modified ${path.dirname(target)} and delete the file if needed.`
-        : `Output directory changed during the write. An empty file may remain at an unknown location outside ${this.root}; it was not deleted automatically. Check what modified ${path.dirname(target)}.`,
-      "OUTPUT_DIR_CHANGED_FILE_LEFT",
-    );
-  }
-
 }

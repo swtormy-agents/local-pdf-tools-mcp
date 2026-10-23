@@ -2,11 +2,13 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { assertPortablePath, isWindowsReserved, PathGuard, testHooks } from "../src/pathGuard";
-import { tmpRoot } from "./helpers";
+import { canSymlink, DIRLINK, tmpRoot } from "./helpers";
 
-// Creating symlinks on Windows needs admin rights or Developer Mode, which CI runners do not guarantee.
-const SYMLINKS = process.platform !== "win32";
-const itSymlink = it.skipIf(!SYMLINKS);
+// QA F8: directory-link races always run (junctions on Windows need no privilege); file-symlink cases run when a
+// runtime probe can create a symlink (skipped only on EPERM).
+const SYMLINKS = true;
+const FILE_SYMLINKS = await canSymlink();
+const itSymlink = it.skipIf(!FILE_SYMLINKS);
 let root: string;
 let outside: string;
 let guard: PathGuard;
@@ -19,10 +21,12 @@ beforeAll(async () => {
   await fs.mkdir(outside);
   await fs.writeFile(path.join(root, "sub", "a.png"), "x");
   await fs.writeFile(path.join(outside, "secret.png"), "x");
-  if (SYMLINKS) {
+  if (FILE_SYMLINKS) {
     await fs.symlink(path.join(outside, "secret.png"), path.join(root, "link-out.png"));
     await fs.symlink(path.join(root, "sub", "a.png"), path.join(root, "link-in.png"));
-    await fs.symlink(outside, path.join(root, "dir-out"));
+  }
+  {
+    await fs.symlink(outside, path.join(root, "dir-out"), DIRLINK);
   }
   guard = await PathGuard.create(root);
 });
@@ -46,9 +50,12 @@ describe("PathGuard", () => {
     await expect(guard.resolveOutputDir(root + "-evil")).rejects.toMatchObject({ code: "PATH_OUTSIDE_ROOT" });
   });
 
-  itSymlink("rejects symlinks that point outside, allows ones inside (skipped on Windows: symlinks need privileges)", async () => {
+  itSymlink("rejects file symlinks that point outside, allows ones inside (skipped only if symlink creation fails with EPERM)", async () => {
     await expect(guard.resolveInputFile("link-out.png")).rejects.toMatchObject({ code: "SYMLINK_OUTSIDE_ROOT" });
     expect(await guard.resolveInputFile("link-in.png")).toBe(path.join(root, "sub", "a.png"));
+  });
+
+  it("rejects a directory link (junction on Windows) pointing outside", async () => {
     await expect(guard.resolveInputDir("dir-out")).rejects.toMatchObject({ code: "SYMLINK_OUTSIDE_ROOT" });
     await expect(guard.resolveOutputDir("dir-out/new")).rejects.toMatchObject({ code: "SYMLINK_OUTSIDE_ROOT" });
     await expect(fs.stat(path.join(outside, "new"))).rejects.toThrow();
@@ -101,7 +108,7 @@ describe("PathGuard", () => {
 
 // Regression for a TOCTOU race: the output directory is swapped for a symlink to a folder outside the root
 // while a (slow) conversion is running. Nothing may be written outside the root.
-describe.skipIf(!SYMLINKS)("TOCTOU: output dir swapped for a symlink (skipped on Windows: symlinks need privileges)", () => {
+describe.skipIf(!SYMLINKS)("TOCTOU: output dir swapped for a symlink (junctions on Windows)", () => {
   async function setup() {
     const base = await tmpRoot();
     const r = path.join(base, "root");
@@ -112,7 +119,7 @@ describe.skipIf(!SYMLINKS)("TOCTOU: output dir swapped for a symlink (skipped on
     const dir = await g.resolveOutputDir("out");
     const swap = async () => {
       await fs.rename(dir, path.join(r, "out-moved"));
-      await fs.symlink(out, dir);
+      await fs.symlink(out, dir, DIRLINK);
     };
     return { g, dir, out, swap };
   }
@@ -128,7 +135,7 @@ describe.skipIf(!SYMLINKS)("TOCTOU: output dir swapped for a symlink (skipped on
     expect(await fs.readdir(out)).toEqual([]);
   });
 
-  it("never deletes by path if the swap happens between the check and open(): empties the stray file and reports it", async () => {
+  it("swap between the check and open(): nothing is created outside the root, nothing deleted (fix/input-race)", async () => {
     const { g, dir, out, swap } = await setup();
     const victim = path.join(out, "keep.png");
     await fs.writeFile(victim, "VICTIM");
@@ -141,15 +148,14 @@ describe.skipIf(!SYMLINKS)("TOCTOU: output dir swapped for a symlink (skipped on
     } finally {
       testHooks.beforeOpen = undefined;
     }
-    expect(err?.code).toBe("OUTPUT_DIR_CHANGED_FILE_LEFT");
-    expect(err.message).not.toMatch(/was removed/);
+    // The file is created relative to the directory actually entered, so the swapped-in symlink is detected before
+    // anything is created outside the root.
+    expect(err?.code).toBe("OUTPUT_DIR_CHANGED");
     expect(await fs.readFile(victim, "utf8")).toBe("VICTIM");
-    // The stray file outside the root holds no data.
-    expect((await fs.stat(path.join(out, "img.png"))).size).toBe(0);
-    if (process.platform === "linux") expect(err.message).toContain(path.join(out, "img.png"));
+    expect(await fs.readdir(out)).toEqual(["keep.png"]);
   });
 
-  it("reports honestly when the dir is swapped back right after open()", async () => {
+  it("swap before open() and back right after it: still nothing created outside the root", async () => {
     const { g, dir, out, swap } = await setup();
     const moved = path.join(path.dirname(dir), "out-moved");
     testHooks.beforeOpen = swap;
@@ -166,52 +172,32 @@ describe.skipIf(!SYMLINKS)("TOCTOU: output dir swapped for a symlink (skipped on
       testHooks.beforeOpen = undefined;
       testHooks.afterOpen = undefined;
     }
-    expect(err?.code).toBe("OUTPUT_DIR_CHANGED_FILE_LEFT");
-    expect(err.message).not.toMatch(/was removed/);
-    expect(await fs.readdir(out)).toEqual(["img.png"]);
-    expect((await fs.stat(path.join(out, "img.png"))).size).toBe(0);
+    expect(err?.code).toBe("OUTPUT_DIR_CHANGED");
+    expect(await fs.readdir(out)).toEqual([]);
     expect(await fs.readdir(dir)).toEqual([]);
   });
 
-  it("leaves an empty file (no partial data, no unlink) when the write fails", async () => {
-    const { g, dir } = await setup();
-    let err: any;
-    try {
-      await g.writeNewFile(dir, "img", "png", async (fh) => {
-        await fh.write(Buffer.from("partial"));
+  it("a failing producer creates nothing (no partial or empty file left)", async () => {
+    const { g, dir, out } = await setup();
+    const err: any = await g
+      .writeNewFile(dir, "img", "png", async () => {
         throw new Error("boom");
-      });
-    } catch (e) {
-      err = e;
-    }
-    expect(err?.code).toBe("WRITE_FAILED_FILE_LEFT");
+      })
+      .catch((e) => e);
+    expect(err?.code).toBe("WRITE_FAILED");
     expect(err.message).toMatch(/boom/);
-    expect(err.message).toContain(path.join(dir, "img.png"));
-    expect((await fs.stat(path.join(dir, "img.png"))).size).toBe(0);
+    expect(await fs.readdir(dir)).toEqual([]);
+    expect(await fs.readdir(out)).toEqual([]);
   });
 
-  it("never touches a file outside the root when the dir is swapped during failure handling", async () => {
-    const { g, dir, out } = await setup();
-    const moved = path.join(path.dirname(dir), "out-moved");
-    const victim = path.join(out, "img.png");
-    await fs.writeFile(victim, "VICTIM DATA");
-    testHooks.beforeCleanup = async () => {
-      await fs.rename(dir, moved);
-      await fs.symlink(out, dir);
-    };
-    let err: any;
-    try {
-      await g.writeNewFile(dir, "img", "png", async (fh) => {
-        await fh.write(Buffer.from("partial"));
-        throw new Error("boom");
-      });
-    } catch (e) {
-      err = e;
-    } finally {
-      testHooks.beforeCleanup = undefined;
-    }
-    expect(err?.code).toBe("WRITE_FAILED_FILE_LEFT");
-    expect(await fs.readFile(victim, "utf8")).toBe("VICTIM DATA");
-    expect((await fs.stat(path.join(moved, "img.png"))).size).toBe(0);
+  it("error messages name only root-relative paths (QA F6)", async () => {
+    const { g, dir, out, swap } = await setup();
+    testHooks.beforeOpen = swap;
+    const err: any = await g.writeNewFile(dir, "img", "png", Buffer.from("data")).catch((e) => e);
+    testHooks.beforeOpen = undefined;
+    expect(err?.code).toBe("OUTPUT_DIR_CHANGED");
+    expect(err.message).toContain('"out"');
+    expect(err.message).not.toContain(g.root);
+    expect(err.message).not.toContain(out);
   });
 });

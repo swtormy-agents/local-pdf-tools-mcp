@@ -31,6 +31,13 @@ type Details = {
   to?: unknown;
   degrees?: unknown;
   option?: unknown;
+  reason?: unknown;
+  limit?: unknown;
+  max?: unknown;
+  total?: unknown;
+  part?: unknown;
+  pages?: unknown;
+  parts?: unknown;
 };
 
 const int = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v);
@@ -94,11 +101,26 @@ export function mapCoreError(e: unknown, ctx: ErrorContext = {}): UserError {
     PDF_INVALID:
       details?.option === "pageSize" || details?.option === "margin"
         ? `Invalid images_to_pdf ${details.option === "margin" ? "marginMm" : "pageSize"}: pageSize must be fit, A4 or Letter; marginMm must be 0-${MAX_MARGIN_MM}.`
-        : `The file${where} is not a valid PDF or is damaged. Re-export it from the original app.`,
+        : details?.reason === "refchain"
+          ? "This PDF can't be processed safely: it contains a chain of object references that is too long, circular or broken."
+          : details?.reason === "image"
+            ? `The PDF${where} contains a JPEG image that cannot be cleaned of its metadata (unusual filter chain or damaged image), so it was not processed. Re-export the PDF from the original app.`
+            : `The file${where} is not a valid PDF or is damaged. Re-export it from the original app.`,
     PAGE_RANGE: `Page numbers are out of range${where}: ${pageDetail}. Use 1-based page numbers that exist in the document (see pdf_info), and keep at least one page.`,
-    TOO_LARGE: `Input is too large${where}: max ${LIMITS.MAX_FILE_BYTES / MB} MB per file and ${LIMITS.MAX_TOTAL_BYTES / MB} MB in total.`,
-    TOO_MANY_PAGES: `The result would have more than ${LIMITS.MAX_PAGES} pages. Split the job into smaller parts.`,
-    TOO_MANY_FILES: `Too many input files: max ${LIMITS.MAX_FILES} per call.`,
+    TOO_LARGE:
+      details?.reason === "decompressed"
+        ? `The PDF${where} expands to more than ${(int(details.limit) ? details.limit : LIMITS.MAX_DECOMPRESSED_BYTES) / MB} MB of decompressed data (compressed object streams), which is more than one call may unpack. It was not processed; it may be a decompression bomb. If the file is genuine, re-save it uncompressed or split it in the app that created it.`
+        : `Input is too large${where}: max ${LIMITS.MAX_FILE_BYTES / MB} MB per file and ${LIMITS.MAX_TOTAL_BYTES / MB} MB in total.`,
+    TOO_MANY_PAGES:
+      details?.limit === "part"
+        ? `Output part ${int(details.part) ? details.part + 1 : "?"} would have ${int(details.pages) ? details.pages : "too many"} pages: max ${LIMITS.MAX_PAGES} pages per output file. Use smaller ranges or a smaller n.`
+        : details?.limit === "total"
+          ? `The split parts together would have more than ${LIMITS.MAX_SPLIT_TOTAL_PAGES} pages (repeated pages counted). Split in several calls.`
+          : `The result would have more than ${LIMITS.MAX_PAGES} pages. Split the job into smaller parts.`,
+    TOO_MANY_FILES:
+      details?.limit === "parts"
+        ? `The split would produce ${int(details.parts) ? details.parts : "too many"} files: max ${LIMITS.MAX_SPLIT_PARTS} output files per call. Use fewer ranges or a larger n, or split in several calls.`
+        : `Too many input files: max ${LIMITS.MAX_FILES} per call.`,
     IMAGE_TOO_LARGE: `Image${where} is larger than ${LIMITS.MAX_IMAGE_PIXELS / 1e6} megapixels. Downscale it first.`,
     IMAGE_INVALID: `Image${where} is damaged or cannot be read. Re-save it as JPEG or PNG in an image editor and try again.`,
     UNSUPPORTED_IMAGE: `Image${where} is not a JPEG or PNG (detected from the file contents, not the extension). Only JPEG and PNG are supported; convert it first (e.g. export as PNG).`,

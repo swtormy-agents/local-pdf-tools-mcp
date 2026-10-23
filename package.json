@@ -1,8 +1,24 @@
 {
   "name": "local-pdf-tools-mcp",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "description": "Local stdio MCP server for PDF merge, split, page organize and images to PDF on your own machine. No network, no telemetry.",
+  "keywords": [
+    "mcp",
+    "pdf",
+    "merge-pdf",
+    "split-pdf",
+    "local",
+    "offline",
+    "privacy"
+  ],
+  "homepage": "https://noclaudkit.com/pdf/",
+  "bugs": {
+    "url": "https://github.com/swtormy-agents/local-pdf-tools-mcp/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/swtormy-agents/local-pdf-tools-mcp.git"
+  },
   "type": "module",
   "main": "dist/server.js",
   "bin": {
@@ -31,7 +47,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@local-pdf-tools/core": "github:swtormy-agents/pdf-tools#331a28a08d3569004f7bd26c752276eadadcb117",
+    "@local-pdf-tools/core": "github:swtormy-agents/pdf-tools#047da26535530d1235f9d6df9bba946960a4cfee",
     "@types/node": "^26.6.5",
     "esbuild": "0.28.2",
     "pdf-lib": "1.17.1",
