@@ -37,25 +37,26 @@ Paths: use an absolute path; `~` is not expanded and is refused. On Windows, esc
 
 Paths are relative to the allowed root. Page numbers are 1-based. Outputs are always new files.
 
-## Allowed folder and file safety
+## Rules
+
+### Allowed folder and file safety
 - `--root <dir>` (or `LOCAL_PDF_TOOLS_ROOT`) is required. A filesystem root, your home directory, folders that contain it, and paths with an unexpanded `~` are refused. All paths must stay inside the root (symlinks are resolved).
 - Inputs are opened race-free: the path is checked with realpath, opened with `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`, and the open handle must be a regular file with the same device/inode as the checked path, which must still resolve inside the root after the open (on Linux the handle's own path is checked too). The file is read through that handle only. Hard links (more than one name for the file, `nlink > 1`) are refused (`PATH_CHANGED`), because they can point at files outside the root. Windows has no `O_NOFOLLOW`: the open itself may follow a link swapped in at the last moment, but the post-open identity check rejects it (`PATH_CHANGED`), so nothing outside the root is read.
 - Outputs are new files only (`name.pdf`, `name-1.pdf`, ...). Nothing is overwritten or deleted, including on error paths.
 
-## Privacy: what is removed from outputs
+### Privacy: what is removed from outputs
 - Every output is a new document, rebuilt by the core: the page dict and `/Resources` keep only allowlisted keys, and for dictionaries recognised by type (fonts, ExtGState, Form/Image XObjects, patterns, shadings, functions, colour-space parameters) the keys below `/Resources` are allowlisted too; other page-description data is kept (see the core README). Data that rendering needs is kept with its bytes copied as is and could carry private data, for example font programs, `/ToUnicode` CMaps, ICC profiles, function and shading streams, page content streams and non-JPEG image data (this list is not complete; see the core README). `/Type`, `/S`, `/Subtype` and `/Filter` are resolved through indirect references before they are checked; a reference chain longer than 32 hops or cyclic fails with `PDF_INVALID`, and references to missing objects are treated as null (the reference may remain, with no data). Removed from the output: the document Info dictionary and catalog XMP metadata, JavaScript/Launch and other actions (also under nonstandard keys or in `/Resources`), OpenAction, attachments (incl. page `/AF`), form fields, XObject `/Metadata` or `/PieceInfo`; only http/https/mailto link annotations survive. JPEG EXIF (incl. GPS), XMP, IPTC and comments are stripped, both from images given to `images_to_pdf` and from JPEG images inside input PDFs. Known limitation: metadata inside JPEG 2000 (`JPXDecode`) images and inside inline images (`BI ... EI` in content streams) is NOT stripped, and text in content streams is copied as is (see the core README, [Security / Known limits](https://github.com/swtormy-agents/pdf-tools/blob/047da26535530d1235f9d6df9bba946960a4cfee/README.md#security)). Do not rely on this tool to anonymize such files.
 - Encrypted PDFs are refused (`PDF_ENCRYPTED`) and never decrypted.
 - stdout carries only MCP JSON-RPC; library warnings go to stderr. The core does not write to stdout (pdf-lib's only `console.log`, in `FlateStream`, is unreachable, and the core has a test for that); the server still routes `console.log/info/debug/...` to stderr before it starts (`src/stdio.ts`) as defense in depth, and `test/stdio.test.ts` checks stdout of the bundled server.
 
-## Limits
+### Limits
 - Limits (owned by the core, same as the website, not configurable): 100 MB per file, 300 MB per call, 1000 pages per result (merge/organize output, each `pdf_split` output file), 50 files per call, 50 MP per image, 500 MB of decompressed PDF stream data per call (`TOO_LARGE`, reported as a possible decompression bomb). `pdf_split`: at most 50 output files (`TOO_MANY_FILES`) and 5000 pages over all output files together, repeats counted (`TOO_MANY_PAGES`); e.g. `every_n` 1000 on a 2000-page PDF works, `every_n` 1 on it does not (2000 files). A reversed range (`from` > `to`) is rejected by the argument schema before the core is called. Ranges are always closed `{from, to}` objects (the core's open string ranges such as `-3` or `5-` are not exposed).
 
-## Tool details
+### Tool details
 - Page numbers in all tools are 1-based. `pdf_split` writes `<input>-p1-3.pdf`, `<input>-p5.pdf`, ... `pdf_organize` takes `order` (final sequence of ORIGINAL page numbers; pages not listed are removed), optional `rotate` (`[{"page":2,"degrees":90}]`, any multiple of 90, added to the current rotation and normalized by the core; entries for the same page are summed) and an optional `delete` shortcut (instead of `order`: all pages except these, in original order). A page may be repeated in `order` to duplicate it. `pdf_info` returns `{ pageCount }` (an encrypted PDF fails with `PDF_ENCRYPTED`). `images_to_pdf` applies EXIF orientation; `pageSize` is `fit` (default: each page has the size of its image), `A4` or `Letter` (portrait, image scaled to fit and centered; sizes come from the core's `PAGE_SIZES`); `marginMm` (0-50, default 0) is converted to points for the core (with `fit` the page grows by twice the margin). With the defaults the output is byte-for-byte the core's default output. The image type is detected from the file contents, not the extension (a PNG named `.jpg` works, HEIC is refused).
 
-## Errors
-- Error codes from the core: `PDF_ENCRYPTED`, `PDF_INVALID`, `PAGE_RANGE`, `TOO_LARGE`, `TOO_MANY_PAGES`, `TOO_MANY_FILES`, `IMAGE_TOO_LARGE`, `IMAGE_INVALID`, `UNSUPPORTED_IMAGE`
-- MCP-side errors, among them:
+### Errors
+- Error codes from the core: `PDF_ENCRYPTED`, `PDF_INVALID`, `PAGE_RANGE`, `TOO_LARGE`, `TOO_MANY_PAGES`, `TOO_MANY_FILES`, `IMAGE_TOO_LARGE`, `IMAGE_INVALID`, `UNSUPPORTED_IMAGE`; plus MCP-side errors, among them:
 
   | Code | Meaning |
   |---|---|
