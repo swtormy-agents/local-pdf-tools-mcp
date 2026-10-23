@@ -2,11 +2,13 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { assertPortablePath, isWindowsReserved, PathGuard, testHooks } from "../src/pathGuard";
-import { tmpRoot } from "./helpers";
+import { canSymlink, DIRLINK, tmpRoot } from "./helpers";
 
-// Creating symlinks on Windows needs admin rights or Developer Mode, which CI runners do not guarantee.
-const SYMLINKS = process.platform !== "win32";
-const itSymlink = it.skipIf(!SYMLINKS);
+// QA F8: directory-link races always run (junctions on Windows need no privilege); file-symlink cases run when a
+// runtime probe can create a symlink (skipped only on EPERM).
+const SYMLINKS = true;
+const FILE_SYMLINKS = await canSymlink();
+const itSymlink = it.skipIf(!FILE_SYMLINKS);
 let root: string;
 let outside: string;
 let guard: PathGuard;
@@ -19,10 +21,12 @@ beforeAll(async () => {
   await fs.mkdir(outside);
   await fs.writeFile(path.join(root, "sub", "a.png"), "x");
   await fs.writeFile(path.join(outside, "secret.png"), "x");
-  if (SYMLINKS) {
+  if (FILE_SYMLINKS) {
     await fs.symlink(path.join(outside, "secret.png"), path.join(root, "link-out.png"));
     await fs.symlink(path.join(root, "sub", "a.png"), path.join(root, "link-in.png"));
-    await fs.symlink(outside, path.join(root, "dir-out"));
+  }
+  {
+    await fs.symlink(outside, path.join(root, "dir-out"), DIRLINK);
   }
   guard = await PathGuard.create(root);
 });
@@ -46,9 +50,12 @@ describe("PathGuard", () => {
     await expect(guard.resolveOutputDir(root + "-evil")).rejects.toMatchObject({ code: "PATH_OUTSIDE_ROOT" });
   });
 
-  itSymlink("rejects symlinks that point outside, allows ones inside (skipped on Windows: symlinks need privileges)", async () => {
+  itSymlink("rejects file symlinks that point outside, allows ones inside (skipped only if symlink creation fails with EPERM)", async () => {
     await expect(guard.resolveInputFile("link-out.png")).rejects.toMatchObject({ code: "SYMLINK_OUTSIDE_ROOT" });
     expect(await guard.resolveInputFile("link-in.png")).toBe(path.join(root, "sub", "a.png"));
+  });
+
+  it("rejects a directory link (junction on Windows) pointing outside", async () => {
     await expect(guard.resolveInputDir("dir-out")).rejects.toMatchObject({ code: "SYMLINK_OUTSIDE_ROOT" });
     await expect(guard.resolveOutputDir("dir-out/new")).rejects.toMatchObject({ code: "SYMLINK_OUTSIDE_ROOT" });
     await expect(fs.stat(path.join(outside, "new"))).rejects.toThrow();
@@ -101,7 +108,7 @@ describe("PathGuard", () => {
 
 // Regression for a TOCTOU race: the output directory is swapped for a symlink to a folder outside the root
 // while a (slow) conversion is running. Nothing may be written outside the root.
-describe.skipIf(!SYMLINKS)("TOCTOU: output dir swapped for a symlink (skipped on Windows: symlinks need privileges)", () => {
+describe.skipIf(!SYMLINKS)("TOCTOU: output dir swapped for a symlink (junctions on Windows)", () => {
   async function setup() {
     const base = await tmpRoot();
     const r = path.join(base, "root");
@@ -112,7 +119,7 @@ describe.skipIf(!SYMLINKS)("TOCTOU: output dir swapped for a symlink (skipped on
     const dir = await g.resolveOutputDir("out");
     const swap = async () => {
       await fs.rename(dir, path.join(r, "out-moved"));
-      await fs.symlink(out, dir);
+      await fs.symlink(out, dir, DIRLINK);
     };
     return { g, dir, out, swap };
   }

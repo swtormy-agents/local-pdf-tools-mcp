@@ -34,6 +34,10 @@ jobs:
         run: npx vitest run test/toctouStress.test.ts
         env:
           TOCTOU_N: "20000"
+      - name: QA F9 folder moves into/out of the root, 20k calls each
+        run: npx vitest run test/folderMoves.test.ts
+        env:
+          MOVES_N: "20000"
       - name: Race tests x N
         shell: bash
         env:

@@ -98,7 +98,13 @@ function write(m, data) {
     let open = true;
     try {
       if (!same(name, st) || !under(ids)) throw E("ECHANGED");
+      // F7: tell the server which file now exists (relative name + dev:ino) BEFORE any byte is written, so it can have
+      // a respawned helper remove it if this helper is killed or times out.
+      send({ progress: true, name, id: id(st) });
       let o = 0;
+      const half = m.testSlowMs ? data.length >> 1 : data.length;
+      while (o < half) o += fs.writeSync(fd, data, o, half - o);
+      if (m.testSlowMs) { fs.fsyncSync(fd); Atomics.wait(sab, 0, 0, m.testSlowMs); }
       while (o < data.length) o += fs.writeSync(fd, data, o, data.length - o);
       fs.fsyncSync(fd);
       fs.closeSync(fd); open = false;
@@ -113,7 +119,24 @@ function write(m, data) {
   }
   throw E("EEXHAUST");
 }
+// F7 cleanup after a killed/timed-out write: walk to the parent with the same dev/ino checks (no symlink followed),
+// then, relative to that verified cwd only: rename the name to a private temp name, lstat it, and unlink it only if it
+// is not a link and has the reported dev:ino and the cwd is still under the root; otherwise rename it back.
+function cleanup(m) {
+  const ids = enter(m, false);
+  let l;
+  try { l = fs.lstatSync(m.name, B); } catch (e) { if (e.code === "ENOENT") return [{ ok: true, gone: true }]; throw e; }
+  if (l.isSymbolicLink() || id(l) !== m.id) throw E("ECHANGED");
+  if (m.testPauseMs) Atomics.wait(sab, 0, 0, m.testPauseMs);
+  const tmp = ".lpt-cleanup-" + process.pid + "-" + Date.now();
+  fs.renameSync(m.name, tmp);
+  const t = fs.lstatSync(tmp, B);
+  if (t.isSymbolicLink() || id(t) !== m.id || !under(ids)) { try { fs.renameSync(tmp, m.name); } catch {} throw E("ECHANGED"); }
+  fs.unlinkSync(tmp);
+  return [{ ok: true }];
+}
 function handle(m, p) {
+  if (m.op === "cleanup") return cleanup(m);
   if (m.op === "read") return read(m);
   if (m.op === "write") return write(m, p);
   if (m.op === "mkdirs") { enter(m, true); return [{ ok: true }]; }
@@ -132,7 +155,7 @@ for (;;) {
 }
 `;
 
-export type FsHeader = { ok?: boolean; error?: string; name?: string; size?: number; nlink?: number };
+export type FsHeader = { ok?: boolean; error?: string; name?: string; size?: number; nlink?: number; progress?: boolean; id?: string; gone?: boolean };
 export type FsReply = { h: FsHeader; p: Buffer };
 
 /** Per-request timeout (ms). Exported setter for tests. */
@@ -140,8 +163,27 @@ let timeoutMs = 30_000;
 export function setFsTimeout(ms: number): void {
   timeoutMs = ms;
 }
+export function getFsTimeout(): number {
+  return timeoutMs;
+}
+/** Test-only: pid of the running helper. */
+export function helperPid(): number | undefined {
+  return child?.pid;
+}
 
-type Current = { resolve: (r: FsReply) => void; reject: (e: Error) => void };
+/** Run a server-side metadata check (realpath/stat) with the same time limit; rejects with code FS_TIMEOUT. */
+export function withFsTimeout<T>(p: Promise<T>): Promise<T> {
+  let t: NodeJS.Timeout;
+  return Promise.race([
+    p,
+    new Promise<never>((_, rej) => {
+      t = setTimeout(() => rej(fsError("FS_TIMEOUT")), timeoutMs);
+      t.unref?.();
+    }),
+  ]).finally(() => clearTimeout(t));
+}
+
+type Current = { resolve: (r: FsReply) => void; reject: (e: Error) => void; progress?: (h: FsHeader) => void };
 let child: ChildProcess | undefined;
 let current: Current | undefined;
 let chunks: Buffer[] = [];
@@ -157,6 +199,7 @@ function idle(c: ChildProcess, busy: boolean): void {
 }
 
 function tryFrame(): void {
+  for (;;) {
   if (!current || buffered < 8) return;
   const all = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks);
   chunks = [all];
@@ -168,8 +211,13 @@ function tryFrame(): void {
   chunks = rest.length ? [rest] : [];
   buffered = rest.length;
   const c = current;
+  if (h.progress) {
+    c.progress?.(h);
+    continue;
+  }
   current = undefined;
   c.resolve({ h, p });
+  }
 }
 
 function helper(): ChildProcess {
@@ -197,7 +245,7 @@ function helper(): ChildProcess {
   return c;
 }
 
-function run(header: object, payload?: Uint8Array): Promise<FsReply> {
+function run(header: object, payload?: Uint8Array, progress?: (h: FsHeader) => void): Promise<FsReply> {
   return new Promise((resolve, reject) => {
     const c = helper();
     idle(c, true);
@@ -214,6 +262,7 @@ function run(header: object, payload?: Uint8Array): Promise<FsReply> {
     current = {
       resolve: (r) => (done(), resolve(r)),
       reject: (e) => (done(), reject(e)),
+      progress,
     };
     const hb = Buffer.from(JSON.stringify(header));
     const pre = Buffer.alloc(8);
@@ -231,8 +280,8 @@ let tail: Promise<unknown> = Promise.resolve();
  * One helper request (serialized: the helper is single-threaded and uses chdir). Rejects with code FS_TIMEOUT (helper
  * killed, respawned on the next call) or EHELPER (helper crashed); the operation's own errno comes back in `h.error`.
  */
-export function fsCall(header: object, payload?: Uint8Array): Promise<FsReply> {
-  const r = tail.then(() => run(header, payload));
+export function fsCall(header: object, payload?: Uint8Array, progress?: (h: FsHeader) => void): Promise<FsReply> {
+  const r = tail.then(() => run(header, payload, progress));
   tail = r.catch(() => undefined);
   return r;
 }

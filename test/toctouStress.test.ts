@@ -12,7 +12,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readInputs } from "../src/io";
 import { PathGuard } from "../src/pathGuard";
-import { tmpRoot } from "./helpers";
+import { DIRLINK, tmpRoot } from "./helpers";
 
 const N = Number(process.env.TOCTOU_N ?? 2000);
 const realPlatform = process.platform;
@@ -20,7 +20,7 @@ afterEach(() => Object.defineProperty(process, "platform", { value: realPlatform
 
 function swapper(root: string, outside: string, name: string) {
   return spawn(process.execPath, ["-e", `const fs=require("fs");const D=${JSON.stringify(path.join(root, name))},O=${JSON.stringify(outside)};
-    for(;;){try{fs.renameSync(D,D+"_real");fs.symlinkSync(O,D);fs.unlinkSync(D);fs.renameSync(D+"_real",D);}catch(e){}}`], { stdio: "ignore" });
+    for(;;){try{fs.renameSync(D,D+"_real");fs.symlinkSync(O,D,"${DIRLINK}");fs.unlinkSync(D);fs.renameSync(D+"_real",D);}catch(e){}}`], { stdio: "ignore" });
 }
 
 async function dirs(sub: string) {
@@ -31,7 +31,7 @@ async function dirs(sub: string) {
   return { root, outside };
 }
 
-describe.skipIf(realPlatform === "win32")("TOCTOU stress (QA repro, symlinks need privileges on Windows)", () => {
+describe("TOCTOU stress (QA repro, junctions on Windows)", () => {
   for (const sim of [false, true]) {
     it(`input: outside content never returned${sim ? " (macOS simulation: platform=darwin, no /proc)" : ""}`, async () => {
       const { root, outside } = await dirs("rin");

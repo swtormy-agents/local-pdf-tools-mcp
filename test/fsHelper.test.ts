@@ -16,12 +16,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import { fsCall, setFsTimeout } from "../src/anchor";
 import { readInputs, writePdf } from "../src/io";
 import { PathGuard } from "../src/pathGuard";
-import { tmpRoot } from "./helpers";
+import { canSymlink, DIRLINK, tmpRoot } from "./helpers";
 
 const N = Number(process.env.QA87_N ?? 1000);
 const CONC = Number(process.env.QA87_C ?? 32);
 const INNER = process.env.QA87_INNER_NOPROC === "1";
-const SYMLINKS = process.platform !== "win32";
+// QA F8: directory-link races always run (junctions on Windows need no privilege); file-symlink cases run when a
+// runtime probe can create a symlink (skipped only on EPERM).
+const SYMLINKS = true;
+const FILE_SYMLINKS = await canSymlink();
 const PDF = "%PDF-1.7\n%%EOF\n";
 
 afterEach(() => setFsTimeout(30_000));
@@ -70,7 +73,7 @@ describe("filesystem helper", () => {
     const { root, outside } = await layout();
     const guard = await PathGuard.create(root);
     await fs.rename(path.join(root, "a"), path.join(root, "aa"));
-    await fs.symlink(outside, path.join(root, "a"));
+    await fs.symlink(outside, path.join(root, "a"), DIRLINK);
     await expect(guard.resolveOutputDir("a/rin/new")).rejects.toMatchObject({ code: "SYMLINK_OUTSIDE_ROOT" });
     expect(await extra(outside)).toEqual([]);
   });
@@ -89,7 +92,7 @@ describe("filesystem helper", () => {
 // Megan's qa87/mine.test.ts as a regular test: 32 concurrent calls while a separate process swaps the leaf folder
 // (sym) or the grandparent (gp) with a symlink to outside. Invariants: no outside content read, nothing at all
 // (file or folder, empty or not) created outside, every failure coded.
-describe.skipIf(!SYMLINKS)("QA87 race repro (symlinks need privileges on Windows)", () => {
+describe.skipIf(!SYMLINKS)("QA87 race repro (junctions on Windows)", () => {
   for (const MODE of ["sym", "gp"] as const)
     for (const OP of ["read", "write"] as const)
       it(`megan87 ${MODE} ${OP}: nothing read from or created outside the root`, async () => {
@@ -99,8 +102,8 @@ describe.skipIf(!SYMLINKS)("QA87 race repro (symlinks need privileges on Windows
         const outDir = OP === "write" ? await guard.resolveOutputDir("a/rin") : "";
         const R = JSON.stringify(root), O = JSON.stringify(outside);
         const scripts = {
-          sym: `for(;;){try{fs.renameSync(R+"/a/rin",R+"/a/rr");fs.symlinkSync(O,R+"/a/rin");fs.unlinkSync(R+"/a/rin");fs.renameSync(R+"/a/rr",R+"/a/rin");}catch(e){}}`,
-          gp: `for(;;){try{fs.renameSync(R+"/a",R+"/aa");fs.symlinkSync(O,R+"/a");fs.unlinkSync(R+"/a");fs.renameSync(R+"/aa",R+"/a");}catch(e){}}`,
+          sym: `for(;;){try{fs.renameSync(R+"/a/rin",R+"/a/rr");fs.symlinkSync(O,R+"/a/rin","${DIRLINK}");fs.unlinkSync(R+"/a/rin");fs.renameSync(R+"/a/rr",R+"/a/rin");}catch(e){}}`,
+          gp: `for(;;){try{fs.renameSync(R+"/a",R+"/aa");fs.symlinkSync(O,R+"/a","${DIRLINK}");fs.unlinkSync(R+"/a");fs.renameSync(R+"/aa",R+"/a");}catch(e){}}`,
         };
         const sw = spawn(process.execPath, ["-e", `const fs=require("fs");const R=${R},O=${O};${scripts[MODE]}`], { stdio: "ignore" });
         await new Promise((r) => setTimeout(r, 150));

@@ -12,10 +12,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { readInputs } from "../src/io";
 import { PathGuard, testHooks } from "../src/pathGuard";
 import { createServer } from "../src/server";
-import { tmpRoot } from "./helpers";
+import { canSymlink, DIRLINK, tmpRoot } from "./helpers";
 
-// Creating symlinks on Windows needs admin rights or Developer Mode, which CI runners do not guarantee.
-const SYMLINKS = process.platform !== "win32";
+// QA F8: directory-link races always run (junctions on Windows need no privilege); file-symlink cases run when a
+// runtime probe can create a symlink (skipped only on EPERM).
+const SYMLINKS = true;
+const FILE_SYMLINKS = await canSymlink();
 
 afterEach(() => {
   testHooks.beforeInputOpen = undefined;
@@ -35,7 +37,7 @@ async function setup() {
   const dir = path.join(root, "rin");
   const swapToOutside = async () => {
     await fs.rename(dir, path.join(root, "rin_real"));
-    await fs.symlink(outside, dir);
+    await fs.symlink(outside, dir, DIRLINK);
   };
   const swapBack = async () => {
     await fs.unlink(dir);
@@ -44,7 +46,7 @@ async function setup() {
   return { base, root, outside, guard, swapToOutside, swapBack };
 }
 
-describe.skipIf(!SYMLINKS)("input TOCTOU: folder swapped for a symlink to outside (skipped on Windows: symlinks need privileges)", () => {
+describe.skipIf(!SYMLINKS)("input TOCTOU: folder swapped for a symlink to outside (junctions on Windows)", () => {
   it("swap between the check and open(): rejected, outside content never returned", async () => {
     const { guard, swapToOutside } = await setup();
     testHooks.beforeInputOpen = swapToOutside;
@@ -56,7 +58,7 @@ describe.skipIf(!SYMLINKS)("input TOCTOU: folder swapped for a symlink to outsid
     testHooks.afterInputOpen = swapBack;
     await expect(readInputs(guard, ["rin/doc.pdf"], "pdf")).rejects.toMatchObject({ code: "PATH_CHANGED" });
   });
-  it("last component swapped for a symlink: O_NOFOLLOW refuses it", async () => {
+  it.skipIf(!FILE_SYMLINKS)("last component swapped for a symlink: O_NOFOLLOW refuses it", async () => {
     const { root, outside, guard } = await setup();
     const file = path.join(root, "rin", "doc.pdf");
     testHooks.beforeInputOpen = async () => {
@@ -133,7 +135,7 @@ function startSwapper(root: string, outside: string, name: string) {
     [
       "-e",
       `const fs=require("fs");const D=${JSON.stringify(path.join(root, name))},O=${JSON.stringify(outside)};
-       for(;;){try{fs.renameSync(D,D+"_real");fs.symlinkSync(O,D);fs.unlinkSync(D);fs.renameSync(D+"_real",D);}catch(e){}}`,
+       for(;;){try{fs.renameSync(D,D+"_real");fs.symlinkSync(O,D,"${DIRLINK}");fs.unlinkSync(D);fs.renameSync(D+"_real",D);}catch(e){}}`,
     ],
     { stdio: "ignore" },
   );

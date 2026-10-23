@@ -35,7 +35,7 @@ export function assertPortablePath(p: string): void {
   }
 }
 
-import { fsCall, identKey, type FsHeader } from "./anchor.js";
+import { fsCall, identKey, withFsTimeout, type FsHeader } from "./anchor.js";
 
 /** Test-only hooks to simulate races (e.g. swapping a directory for a symlink). Never set in production. */
 export const testHooks: {
@@ -47,6 +47,9 @@ export const testHooks: {
   afterOpen?: (dir: string) => Promise<void> | void;
   /** Input side: called after the realpath/stat check, immediately before the helper opens the input. */
   beforeInputOpen?: (real: string) => Promise<void> | void;
+  /** Extra fields for helper write/cleanup requests (testSlowMs, testPauseMs). */
+  writeExtra?: Record<string, unknown>;
+  cleanupExtra?: Record<string, unknown>;
   /** Input side: called after the helper request finished. */
   afterInputOpen?: (real: string) => Promise<void> | void;
   /** Input side: called at named steps ("afterRealpath", "beforeHelper"). */
@@ -81,7 +84,7 @@ export class PathGuard {
     } catch {
       throw new UserError(`Allowed root directory does not exist: ${root}. Set --root or LOCAL_PDF_TOOLS_ROOT to an existing directory.`, "ROOT_MISSING");
     }
-    const st = await fs.stat(real, { bigint: true });
+    const st = await withFsTimeout(fs.stat(real, { bigint: true }));
     if (!st.isDirectory()) throw new UserError(`Allowed root is not a directory: ${root}.`, "ROOT_NOT_DIR");
     assertSafeRoot(real);
     return new PathGuard(real, identKey(st));
@@ -115,7 +118,7 @@ export class PathGuard {
   }
 
   private async real(abs: string, original: string): Promise<string> {
-    const real = await fs.realpath(abs);
+    const real = await withFsTimeout(fs.realpath(abs));
     if (!this.isInside(real)) {
       throw new UserError(`Path "${original}" resolves (via a symlink) to a location outside the allowed root. Symlinks may only point inside the allowed root.`, "SYMLINK_OUTSIDE_ROOT");
     }
@@ -133,10 +136,11 @@ export class PathGuard {
     );
   }
 
-  private helperFailed(e: unknown, what: string): UserError {
+  /** `after` describes what is known about side effects (reads/mkdir: nothing written; writes: cleanup result). */
+  private helperFailed(e: unknown, what: string, after = "No output file was created."): UserError {
     const code = (e as NodeJS.ErrnoException)?.code;
-    if (code === "FS_TIMEOUT") return new UserError(`${what} timed out (the filesystem did not answer within the time limit). Nothing was read or written.`, "FS_TIMEOUT");
-    return new UserError(`${what} failed: the filesystem helper process stopped unexpectedly. Try again.`, "FS_HELPER_FAILED");
+    if (code === "FS_TIMEOUT") return new UserError(`${what} timed out (the filesystem did not answer within the time limit). The request was not completed. ${after}`, "FS_TIMEOUT");
+    return new UserError(`${what} failed: the filesystem helper process stopped unexpectedly. The request was not completed. ${after} Try again.`, "FS_HELPER_FAILED");
   }
 
   /** Resolve an existing regular file for reading (path checks only; read through readInputFile). */
@@ -152,9 +156,10 @@ export class PathGuard {
     try {
       real = await this.real(abs, p);
       await testHooks.inputStep?.("afterRealpath");
-      st = await fs.stat(real, { bigint: true });
+      st = await withFsTimeout(fs.stat(real, { bigint: true }));
     } catch (e) {
       if (e instanceof UserError) throw e;
+      if ((e as NodeJS.ErrnoException)?.code === "FS_TIMEOUT") throw this.helperFailed(e, `Checking "${p}"`, "Nothing was read or written.");
       throw this.notFound(p);
     }
     if (!st.isFile()) throw new UserError(`Input "${p}" is not a regular file.`, "INPUT_NOT_FILE");
@@ -183,7 +188,7 @@ export class PathGuard {
         expect: identKey(st),
         max: Number.isFinite(maxBytes) ? maxBytes : -1,
       }).catch((e) => {
-        throw this.helperFailed(e, `Reading "${p}"`);
+        throw this.helperFailed(e, `Reading "${p}"`, "Nothing was written.");
       });
     } finally {
       await testHooks.afterInputOpen?.(real);
@@ -220,9 +225,12 @@ export class PathGuard {
       real = await this.real(abs, p);
     } catch (e) {
       if (e instanceof UserError) throw e;
+      if ((e as NodeJS.ErrnoException)?.code === "FS_TIMEOUT") throw this.helperFailed(e, `Checking "${p}"`, "Nothing was read or written.");
       throw new UserError(`Directory not found: "${p}".`, "DIR_NOT_FOUND");
     }
-    const st = await fs.stat(real);
+    const st = await withFsTimeout(fs.stat(real)).catch((e) => {
+      throw this.helperFailed(e, `Checking "${p}"`, "Nothing was read or written.");
+    });
     if (!st.isDirectory()) throw new UserError(`"${p}" is not a directory.`, "NOT_DIR");
     return real;
   }
@@ -242,9 +250,10 @@ export class PathGuard {
     const missing: string[] = [];
     for (;;) {
       try {
-        await fs.lstat(cur);
+        await withFsTimeout(fs.lstat(cur));
         break;
-      } catch {
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException)?.code === "FS_TIMEOUT") throw this.helperFailed(e, `Checking output directory "${p}"`, "Nothing was written.");
         missing.unshift(path.basename(cur));
         const parent = path.dirname(cur);
         if (parent === cur) break;
@@ -255,16 +264,17 @@ export class PathGuard {
     let st: import("node:fs").Stats;
     try {
       realBase = await this.real(cur, p);
-      st = await fs.stat(realBase);
+      st = await withFsTimeout(fs.stat(realBase));
     } catch (e) {
       if (e instanceof UserError) throw e;
+      if ((e as NodeJS.ErrnoException)?.code === "FS_TIMEOUT") throw this.helperFailed(e, `Checking output directory "${p}"`, "Nothing was written.");
       throw this.dirChanged(p);
     }
     if (!st.isDirectory()) throw new UserError(`Output path "${p}" is not a directory.`, "OUTPUT_NOT_DIR");
     const out = path.join(realBase, ...missing);
     if (missing.length === 0) return out;
     const r = await fsCall({ op: "mkdirs", root: this.root, rootId: this.rootId, parts: this.partsOf(out) }).catch((e) => {
-      throw this.helperFailed(e, `Creating output directory "${p}"`);
+      throw this.helperFailed(e, `Creating output directory "${p}"`, "Some of the missing folders may already have been created (empty); no file was written.");
     });
     if (r.h.error) {
       if (WRITE_CODES.has(r.h.error) && !RACE_CODES.has(r.h.error)) {
@@ -297,8 +307,24 @@ export class PathGuard {
     let r;
     try {
       await testHooks.beforeOpen?.(dir);
-      r = await fsCall({ op: "write", root: this.root, rootId: this.rootId, parts: this.partsOf(dir), base, ext }, bytes).catch((e) => {
-        throw this.helperFailed(e, `Writing to "${shown}"`);
+      const parts = this.partsOf(dir);
+      let created: { name: string; id: string } | undefined;
+      r = await fsCall({ op: "write", root: this.root, rootId: this.rootId, parts, base, ext, ...testHooks.writeExtra }, bytes, (h) => {
+        created = { name: h.name!, id: h.id! };
+      }).catch(async (e) => {
+        if (!created) throw this.helperFailed(e, `Writing to "${shown}"`);
+        // F7: the killed helper had already created `created.name`; a fresh helper removes it if it is still ours.
+        const where = `"${shown}/${created.name}"`;
+        const c = await fsCall({ op: "cleanup", root: this.root, rootId: this.rootId, parts, ...created, ...testHooks.cleanupExtra }).catch(
+          (e2: NodeJS.ErrnoException) => ({ h: { error: e2.code ?? "EHELPER" } as FsHeader }),
+        );
+        throw this.helperFailed(
+          e,
+          `Writing to "${shown}"`,
+          c.h.error
+            ? `The partially written file ${where} could not be removed (${c.h.error}) and may remain; delete it manually.`
+            : "The partially written output file was removed.",
+        );
       });
     } finally {
       await testHooks.afterOpen?.(dir);
