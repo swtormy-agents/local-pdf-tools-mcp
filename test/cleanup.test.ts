@@ -162,9 +162,9 @@ describe("F7: no output left after timeout or helper crash", () => {
       expect(r.h.error).toBe("ENOLINKSUPPORT");
       expect(await fs.readdir(path.join(root, "o"))).toEqual(["x.pdf"]);
       expect(await fs.readFile(f, "utf8")).toBe("ours");
-      testHooks.writeExtra = { testSlowMs: 5000 };
+      testHooks.writeExtra = { testSlowMs: 20000 };
       testHooks.cleanupExtra = { testLinkError: code };
-      setFsTimeout(800);
+      setFsTimeout(4000); // generous: on slow Windows runners the helper start alone can exceed 800 ms (CI 40002005192)
       const e: any = await writePdf(guard, path.join(root, "o"), "t", DATA).catch((x) => x);
       expect(e.code).toBe("FS_TIMEOUT");
       expect(e.message).toContain('"o/t.pdf" may remain');
