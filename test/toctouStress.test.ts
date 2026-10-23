@@ -96,7 +96,21 @@ describe("TOCTOU stress (QA repro, junctions on Windows)", () => {
         for (const f of leaked) expect((await fs.stat(path.join(outside, f))).size, f).toBe(0);
         for (const t of okNames) expect(leaked).not.toContain(path.basename(t));
       }
-      for (const t of okNames) expect((await fs.readFile(path.join(real, path.basename(t)), "utf8"))).toBe("%PDF-1.7 PAYLOAD");
+      // Every success must be a real file inside the root with the payload. Look in both places the inside folder can be
+      // (its name or <name>_real, depending on where the swapper was killed) and report the full layout on failure.
+      const layout = async () => JSON.stringify(Object.fromEntries(await Promise.all([dir, dir + "_real", outside].map(async (d) =>
+        [d, await fs.lstat(d).then((st) => `${st.isSymbolicLink() ? "link" : st.isDirectory() ? "dir" : "other"}:` + "", () => "missing")
+          + (await fs.readdir(d).then((x) => x.join(","), () => ""))]))));
+      for (const t of okNames) {
+        const b = path.basename(t);
+        const hits: string[] = [];
+        for (const d of [real, real === dir ? dir + "_real" : dir]) {
+          if (!(await isDir(d))) continue;
+          const c = await fs.readFile(path.join(d, b), "utf8").catch(() => null);
+          if (c !== null) { expect(c).toBe("%PDF-1.7 PAYLOAD"); hits.push(d); }
+        }
+        expect(hits.length, `${b} not found inside the root; layout ${await layout()}; ${JSON.stringify(res)}`).toBe(1);
+      }
       expect(res.codes.NOCODE, JSON.stringify(res)).toBeUndefined();
     }, 600_000);
   }
