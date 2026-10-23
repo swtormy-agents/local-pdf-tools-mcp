@@ -167,8 +167,8 @@ describe.skipIf(!SYMLINKS)("live race (poc/race.mjs, in mode)", () => {
 
   // Output side of the same race: root/out is swapped with a symlink to an outside folder while pdf_merge writes.
   // Nothing may ever be created outside the root, and a reported success must name a file that is inside.
-  it("never writes outside the root while outputDir is being swapped (out mode)", async () => {
-    testHooks.noProcFd = true;
+  for (const noProc of [false, true]) it(`never writes outside the root while outputDir is being swapped (out mode)${noProc ? " (no /proc)" : ""}`, async () => {
+    testHooks.noProcFd = noProc;
     const { root, outside } = await setup();
     await fs.writeFile(path.join(root, "rin", "doc.pdf"), await fx.plainPdf(2));
     await fs.mkdir(path.join(root, "out"));
@@ -183,10 +183,60 @@ describe.skipIf(!SYMLINKS)("live race (poc/race.mjs, in mode)", () => {
       }
       swapper.kill();
       const leaked = (await fs.readdir(outside)).filter((f) => f !== "doc.pdf");
-      expect(leaked, JSON.stringify(res)).toEqual([]);
+      // No openat()/chdir off Linux: an EMPTY file may be created outside at the exact open, but the fd is verified
+      // before any byte is written, so it stays empty and is never a success. Linux anchors via /proc/self/fd.
+      if (process.platform === "linux" && !testHooks.noProcFd) expect(leaked, JSON.stringify(res)).toEqual([]);
+      for (const f of leaked) expect((await fs.stat(path.join(outside, f))).size, f).toBe(0);
       for (const code of Object.keys(res.codes)) expect(["OUTPUT_DIR_CHANGED", "OUTPUT_DIR_CHANGED_FILE_LEFT", "SYMLINK_OUTSIDE_ROOT", "PATH_CHANGED", "DIR_NOT_FOUND", "NOT_DIR"], JSON.stringify(res)).toContain(code);
     } finally {
       swapper.kill();
     }
   }, 120_000);
+
+  // Megan's re-QA: many tool calls in flight at once (async interleaving at every await) while both the input and the
+  // output folder are swapped. Path resolution has no process-global state (no chdir), so parallel calls must keep
+  // every invariant: no outside read, no data written outside, every success inside, every failure coded, cwd intact.
+  for (const noProc of [false, true]) it(`parallel tool calls under concurrent symlink swaps${noProc ? " (no /proc)" : ""}`, async () => {
+    testHooks.noProcFd = noProc;
+    const { root, outside } = await setup();
+    await fs.writeFile(path.join(root, "rin", "doc.pdf"), await fx.plainPdf(3));
+    await fs.writeFile(path.join(outside, "doc.pdf"), await fx.plainPdf(1));
+    await fs.mkdir(path.join(root, "out"));
+    const cwd = process.cwd();
+    const sws = [startSwapper(root, outside, "rin"), startSwapper(root, outside, "out")];
+    const res = { ok: 0, outsideReads: 0, codes: {} as Record<string, number> };
+    const okFiles: string[] = [];
+    try {
+      const client = await connect(root);
+      const BATCH = 32;
+      for (let b = 0; b < Math.max(4, Math.floor(ITER / BATCH)); b++) {
+        await Promise.all(
+          Array.from({ length: BATCH }, async (_, j) => {
+            const i = b * BATCH + j;
+            const r: any =
+              j % 2 === 0
+                ? await client.callTool({ name: "pdf_info", arguments: { input: "rin/doc.pdf" } })
+                : await client.callTool({ name: "pdf_merge", arguments: { inputs: ["rin/doc.pdf", "rin/doc.pdf"], outputDir: "out", outputName: `p${i}` } });
+            if (r.isError) res.codes[codeOf(r)] = (res.codes[codeOf(r)] ?? 0) + 1;
+            else {
+              res.ok++;
+              if (j % 2 === 0 && r.structuredContent.pageCount !== 3) res.outsideReads++;
+              if (j % 2 === 1) okFiles.push(`p${i}.pdf`);
+            }
+          }),
+        );
+        expect(process.cwd()).toBe(cwd);
+      }
+    } finally {
+      for (const s of sws) s.kill();
+    }
+    await new Promise((r) => setTimeout(r, 100));
+    expect(res.outsideReads, JSON.stringify(res)).toBe(0);
+    const leaked = (await fs.readdir(outside)).filter((f) => f !== "doc.pdf");
+    for (const f of leaked) expect((await fs.stat(path.join(outside, f))).size, f).toBe(0);
+    for (const f of okFiles) expect(leaked).not.toContain(f);
+    if (process.platform === "linux" && !noProc) expect(leaked, JSON.stringify(res)).toEqual([]);
+    const allowed = ["INPUT_NOT_FOUND", "SYMLINK_OUTSIDE_ROOT", "PATH_CHANGED", "INPUT_NOT_FILE", "OUTPUT_DIR_CHANGED", "OUTPUT_DIR_CHANGED_FILE_LEFT", "DIR_NOT_FOUND", "NOT_DIR"];
+    for (const code of Object.keys(res.codes)) expect(allowed, JSON.stringify(res)).toContain(code);
+  }, 300_000);
 });

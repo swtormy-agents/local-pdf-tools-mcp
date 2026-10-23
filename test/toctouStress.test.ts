@@ -2,7 +2,8 @@
  * Megan's QA repros (qa/mcp-toctou stress.test.ts, out.test.ts, 2026-10-22) turned into assertions.
  * A separate process swaps a folder inside the root with a symlink to an outside folder in a tight loop.
  * Inputs: never the outside content (also with process.platform faked as darwin, i.e. no /proc/self/fd check).
- * Outputs: no file (empty or not) is ever created outside the root, and every reported success is inside it.
+ * Outputs: Linux creates no file outside (anchored via /proc/self/fd/<dirfd>); elsewhere at most an empty, never-written
+ * file can appear outside (no openat in Node). Every reported success is inside the root.
  * TOCTOU_N scales the call count (CI stress job uses more).
  */
 import { spawn } from "node:child_process";
@@ -83,7 +84,15 @@ describe.skipIf(realPlatform === "win32")("TOCTOU stress (QA repro, symlinks nee
       // The swapper may be killed mid-cycle: the inside folder is either at its name or at <name>_real.
       const isDir = (p: string) => fs.lstat(p).then((s) => s.isDirectory(), () => false);
       const real = (await isDir(dir)) ? dir : dir + "_real";
-      expect(await fs.readdir(outside), JSON.stringify(res)).toEqual([]);
+      const leaked = await fs.readdir(outside);
+      if (!sim) expect(leaked, JSON.stringify(res)).toEqual([]);
+      else {
+        // Without openat()/chdir (unavailable in Node / process-global) a parent swap at the exact open can still
+        // create an EMPTY file outside off Linux: the fd is verified before any byte is written, so it is never written
+        // to and never reported as success. Linux anchors the create via /proc/self/fd/<dirfd> (case above).
+        for (const f of leaked) expect((await fs.stat(path.join(outside, f))).size, f).toBe(0);
+        for (const t of okNames) expect(leaked).not.toContain(path.basename(t));
+      }
       for (const t of okNames) expect((await fs.readFile(path.join(real, path.basename(t)), "utf8"))).toBe("%PDF-1.7 PAYLOAD");
       expect(res.codes.NOCODE, JSON.stringify(res)).toBeUndefined();
     }, 600_000);

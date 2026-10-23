@@ -1,5 +1,4 @@
 import { constants as C } from "node:fs";
-import { closeSync, openSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { assertSafeRoot } from "./config.js";
@@ -69,60 +68,84 @@ const INPUT_FLAGS = C.O_RDONLY | (C.O_NOFOLLOW ?? 0) | (C.O_NONBLOCK ?? 0);
 /** Exact identity of a file (bigint stats: Windows file indexes do not fit a double). */
 const sameFile = (a: { dev: bigint; ino: bigint }, b: { dev: bigint; ino: bigint }) => a.dev === b.dev && a.ino === b.ino;
 
+type Ident = { dev: bigint; ino: bigint };
+/** One verified directory of a walked chain: absolute path, identity, and (POSIX) an open O_DIRECTORY fd pinning it. */
+type ChainDir = { p: string; id: Ident; fh?: fs.FileHandle };
+
+const DIR_FLAGS = C.O_RDONLY | (C.O_DIRECTORY ?? 0) | (C.O_NOFOLLOW ?? 0);
+
+const looped = (msg: string) => Object.assign(new Error(msg), { code: "ELOOP" });
+
 /**
- * Open `name` relative to the directory `dir` *by directory identity*, not by path (TOCTOU fix, macOS CI race):
- * Node has no openat(), so we chdir into `dir` and open the bare name relative to the cwd. Once chdir succeeded the
- * kernel resolves `name` inside that directory inode, so swapping `dir` (or any parent) for a symlink afterwards cannot
- * redirect the open. process.cwd() right after chdir is the kernel's getcwd() of the directory we actually entered
- * (macOS/Linux/Windows), so a symlink swapped in *before* chdir is visible as a cwd outside the root. chdir(".")
- * after the open refreshes Node's cached cwd so a directory moved away during the open is seen too.
- * Fully synchronous (no await between chdir and restore), so no other request can observe the changed cwd.
- * `name` must be a single path component.
+ * chdir-free, component-by-component resolution (QA TOCTOU, Megan). No process-global state (no process.chdir), so
+ * any number of concurrent tool calls may interleave at awaits safely. Node has no openat(), so each component of
+ * root -> dir is checked by identity:
+ * - lstat the prefix path: must be a real directory (not a symlink);
+ * - POSIX: open it with O_RDONLY|O_DIRECTORY|O_NOFOLLOW, fstat the fd, require the lstat's dev/ino. The fd stays open
+ *   until the call ends, so the inode cannot be freed and reused meanwhile (no inode-reuse ABA);
+ * - "<dir>/.." must have the dev/ino of the previous chain entry (the chain is linked, not just a set of dirs).
+ * Windows has neither O_DIRECTORY nor O_NOFOLLOW: lstat-only chain (symlinks there need admin/Developer Mode).
  */
-function openInDir(dir: string, name: string, flags: number, mode?: number): { fd?: number; err?: unknown; cwdBefore: string; cwdAfter?: string } {
-  const prev = process.cwd();
-  let cwdBefore: string;
+async function walkDirs(root: string, dir: string): Promise<ChainDir[]> {
+  const rel = path.relative(root, dir);
+  const parts = rel === "" ? [] : rel.split(path.sep);
+  const chain: ChainDir[] = [];
+  let cur = root;
   try {
-    process.chdir(dir);
-  } catch (err) {
-    return { err, cwdBefore: "" };
-  }
-  try {
-    cwdBefore = process.cwd();
-    if (gate && !gate(cwdBefore)) return { cwdBefore };
-    let fd: number;
-    try {
-      fd = openSync(name, flags, mode);
-    } catch (err) {
-      return { err, cwdBefore };
+    for (let i = 0; i <= parts.length; i++) {
+      if (i > 0) cur = path.join(cur, parts[i - 1]);
+      const l = await fs.lstat(cur, { bigint: true });
+      if (l.isSymbolicLink() || !l.isDirectory()) throw looped(`not a plain directory: ${cur}`);
+      const entry: ChainDir = { p: cur, id: { dev: l.dev, ino: l.ino } };
+      chain.push(entry);
+      if (process.platform !== "win32") {
+        entry.fh = await fs.open(cur, DIR_FLAGS);
+        if (!sameFile(await entry.fh.stat({ bigint: true }), entry.id)) throw looped("directory changed");
+      }
+      if (i > 0 && !sameFile(await fs.stat(path.join(cur, ".."), { bigint: true }), chain[i - 1].id)) throw looped("directory chain changed");
     }
-    process.chdir(".");
-    return { fd, cwdBefore, cwdAfter: process.cwd() };
-  } finally {
-    process.chdir(prev);
-  }
-}
-/**
- * Turn a raw fd from openInDir into a FileHandle (Node cannot wrap an fd): reopen /dev/fd/N, which on macOS dup()s the
- * descriptor and on Linux reopens the very same open file (never a path lookup of the original name), then require
- * the same dev/ino and close the raw fd.
- */
-async function adoptFd(fd: number, flags: number): Promise<fs.FileHandle> {
-  try {
-    const fh = await fs.open(`/dev/fd/${fd}`, flags);
-    const [a, b] = await Promise.all([fh.stat({ bigint: true }), fs.stat(`/dev/fd/${fd}`, { bigint: true })]);
-    if (!sameFile(a, b)) {
-      await fh.close();
-      throw new Error("fd adoption mismatch");
-    }
-    return fh;
-  } finally {
-    closeSync(fd);
+    return chain;
+  } catch (e) {
+    await closeChain(chain);
+    throw e;
   }
 }
 
-/** Set by openInDir callers: refuse to open when the entered directory is not acceptable. */
-let gate: ((cwd: string) => boolean) | undefined;
+/** Every directory of the chain still has the same identity at the same path (lstat, no symlink), fd included. */
+async function chainIntact(chain: ChainDir[]): Promise<boolean> {
+  try {
+    for (const d of chain) {
+      const l = await fs.lstat(d.p, { bigint: true });
+      if (l.isSymbolicLink() || !sameFile(l, d.id)) return false;
+      if (d.fh && !sameFile(await d.fh.stat({ bigint: true }), d.id)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function closeChain(chain: ChainDir[]): Promise<void> {
+  await Promise.all(chain.map((d) => d.fh?.close().catch(() => undefined)));
+  chain.length = 0;
+}
+
+/**
+ * Open `name` inside the last directory of a verified chain. Linux: through /proc/self/fd/<dirfd>/<name>, which the
+ * kernel resolves inside the pinned directory inode (an openat() equivalent), so a parent swap cannot redirect it.
+ * Elsewhere by path; callers then verify the fd (identity + chain) before reading or writing anything.
+ */
+function openInChain(chain: ChainDir[], name: string, flags: number, mode?: number): Promise<fs.FileHandle> {
+  const last = chain[chain.length - 1];
+  if (process.platform === "linux" && !testHooks.noProcFd && last.fh) return fs.open(`/proc/self/fd/${last.fh.fd}/${name}`, flags, mode);
+  return fs.open(path.join(last.p, name), flags, mode);
+}
+
+/** Linux: the real path of an open fd (/proc/self/fd). undefined elsewhere or when unavailable. */
+async function procPath(fh: fs.FileHandle): Promise<string | undefined> {
+  if (process.platform !== "linux" || testHooks.noProcFd) return undefined;
+  return fs.readlink(`/proc/self/fd/${fh.fd}`).catch(() => undefined);
+}
 
 const errnoOf = (e: unknown) => (e as NodeJS.ErrnoException | null)?.code;
 
@@ -224,22 +247,12 @@ export class PathGuard {
     const { abs, real, st: before } = await this.checkInputFile(p);
     await testHooks.beforeInputOpen?.(real);
     let fh: fs.FileHandle;
+    let chain: ChainDir[] = [];
     try {
-      if (process.platform === "win32") fh = await fs.open(real, INPUT_FLAGS);
-      else {
-      gate = (cwd) => this.isInside(cwd);
-      const r = openInDir(path.dirname(real), path.basename(real), INPUT_FLAGS);
-      gate = undefined;
-      if (r.err) throw r.err;
-      if (r.fd === undefined || !this.isInside(r.cwdBefore)) throw this.changed(p);
-      if (r.cwdAfter === undefined || !this.isInside(r.cwdAfter)) {
-        closeSync(r.fd);
-        throw this.changed(p);
-      }
-      fh = await adoptFd(r.fd, C.O_RDONLY | (C.O_NONBLOCK ?? 0));
-      }
+      chain = await walkDirs(this.root, path.dirname(real));
+      fh = await openInChain(chain, path.basename(real), INPUT_FLAGS);
     } catch (e) {
-      gate = undefined;
+      await closeChain(chain);
       if (e instanceof UserError) throw e;
       const code = errnoOf(e);
       if (code === "ENOENT" || code === "ENOTDIR") throw this.notFound(p, abs);
@@ -270,14 +283,23 @@ export class PathGuard {
         throw new UserError(`Path "${p}" resolves (via a symlink) to a location outside the allowed root. Symlinks may only point inside ${this.root}.`, "SYMLINK_OUTSIDE_ROOT");
       }
       if (again !== real || !sameFile(now, st)) throw this.changed(p);
-      if (process.platform === "linux" && !testHooks.noProcFd) {
-        const actual = await fs.readlink(`/proc/self/fd/${fh.fd}`).catch(() => undefined);
-        if (actual !== undefined && (actual.endsWith(" (deleted)") || !this.isInside(actual))) throw this.changed(p);
+      // The final fd must be the entry at <verified dir>/<name>: lstat it directly (no realpath) and re-verify the
+      // whole directory chain after it, so a parent swapped and swapped back around the open is detected.
+      let entry: import("node:fs").BigIntStats;
+      try {
+        entry = await fs.lstat(real, { bigint: true });
+      } catch {
+        throw this.changed(p);
       }
+      if (!sameFile(entry, st) || !(await chainIntact(chain))) throw this.changed(p);
+      const actual = await procPath(fh);
+      if (actual !== undefined && (actual.endsWith(" (deleted)") || !this.isInside(actual) || actual !== real)) throw this.changed(p);
       return { real, fh };
     } catch (e) {
       await fh.close();
       throw e;
+    } finally {
+      await closeChain(chain);
     }
   }
 
@@ -346,9 +368,11 @@ export class PathGuard {
    * Write `data` to a new file `<base>[-N].<ext>` in `dir` without overwriting anything and without escaping the root,
    * even if `dir` (or a parent) is swapped for a symlink while we work:
    * 1. right before opening, realpath(dir) again and require it to be unchanged and inside the root;
-   * 2. open with O_CREAT|O_EXCL|O_NOFOLLOW (never follows a symlink at the target, never overwrites);
-   * 3. after writing, realpath the new file and compare its device/inode with the open handle (fstat);
-   *    if it is not the file we created inside the root, delete what we wrote and fail.
+   * 2. walk and pin the directory chain from the root (walkDirs: lstat + O_DIRECTORY|O_NOFOLLOW fd + dev/ino + parent
+   *    links), then create with O_CREAT|O_EXCL|O_NOFOLLOW in the verified dir (Linux: via /proc/self/fd/<dirfd>);
+   * 3. BEFORE writing any data: lstat(<dir>/<name>) must be the fd's inode, the chain intact, (Linux) /proc agrees;
+   *    otherwise nothing is written, the empty file is left (never unlinked by path) and the call fails;
+   * 4. after writing, the same identity check again.
    */
   async writeNewFile(dir: string, base: string, ext: string, data: Buffer | ((fh: fs.FileHandle) => Promise<void>)): Promise<string> {
     if (isWindowsReserved(base)) base = `_${base}`;
@@ -361,26 +385,23 @@ export class PathGuard {
       const target = path.join(dir, name);
       let fh: fs.FileHandle;
       let moved = false;
+      let chain: ChainDir[] = [];
       try {
-        if (process.platform === "win32") fh = await fs.open(target, flags, 0o644);
-        else {
-          // Create relative to the directory we actually entered (see openInDir), not by path: a parent swapped for a
-          // symlink between the re-check and the open can no longer redirect the new file outside the root.
-          gate = (cwd) => cwd === dir;
-          const r = openInDir(dir, name, flags, 0o644);
-          gate = undefined;
-          if (r.err) throw r.err;
-          if (r.fd === undefined) {
-            throw new UserError(`Output directory ${dir} was replaced (now resolves to ${r.cwdBefore}) while converting. Nothing was written. Make sure nothing else modifies the folder.`, "OUTPUT_DIR_CHANGED");
-          }
-          moved = r.cwdAfter !== dir;
-          fh = await adoptFd(r.fd, C.O_WRONLY);
+        // Create inside a directory verified component by component (no chdir), then verify the new fd BEFORE any
+        // data is written: the chain is unchanged, <dir>/<name> is exactly our inode, and (Linux) /proc/self/fd agrees.
+        chain = await walkDirs(this.root, dir);
+        fh = await openInChain(chain, name, flags, 0o644);
+        let ok = false;
+        try {
+          const st = await fh.stat({ bigint: true });
+          const l = await fs.lstat(target, { bigint: true });
+          ok = l.isFile() && sameFile(l, st) && (await chainIntact(chain));
+        } catch {
+          ok = false;
         }
-        // Verify via the fd BEFORE any data is written (Linux: /proc/self/fd names the real location of the new file).
-        if (!moved && process.platform === "linux" && !testHooks.noProcFd) {
-          const actual = await fs.readlink(`/proc/self/fd/${fh.fd}`).catch(() => undefined);
-          if (actual !== undefined && (actual.endsWith(" (deleted)") || path.dirname(actual) !== dir)) moved = true;
-        }
+        const actual = await procPath(fh);
+        if (actual !== undefined && (actual.endsWith(" (deleted)") || path.dirname(actual) !== dir)) ok = false;
+        moved = !ok;
         if (moved) {
           try {
             await this.verifyWritten(target, fh, true);
@@ -389,7 +410,7 @@ export class PathGuard {
           }
         }
       } catch (e) {
-        gate = undefined;
+        await closeChain(chain);
         if (e instanceof UserError) throw e;
         const code = (e as NodeJS.ErrnoException).code;
         if (code === "EEXIST" || code === "ELOOP") continue;
@@ -409,7 +430,7 @@ export class PathGuard {
         }
         await this.verifyWritten(target, fh, moved);
       } finally {
-        await fh.close();
+        await fh.close();  await closeChain(chain);
       }
       return target;
     }
