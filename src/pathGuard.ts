@@ -1,6 +1,7 @@
 import { constants as C } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { anchoredLstat, identKey } from "./anchor.js";
 import { assertSafeRoot } from "./config.js";
 import { UserError } from "./errors.js";
 
@@ -60,6 +61,8 @@ export const testHooks: {
   beforeInputOpen?: (real: string) => Promise<void> | void;
   /** Input side: called right after the input file was opened, before the post-open checks. */
   afterInputOpen?: (real: string) => Promise<void> | void;
+  /** Input side: called at named steps of the check/open/verify sequence (deterministic ABA swap tests). */
+  inputStep?: (step: string) => Promise<void> | void;
   /** Disable the Linux-only /proc/self/fd checks, so Linux CI exercises the same checks as macOS/BSD. */
   noProcFd?: boolean;
 } = {};
@@ -230,6 +233,7 @@ export class PathGuard {
     let st: import("node:fs").BigIntStats;
     try {
       real = await this.real(abs, p);
+      await testHooks.inputStep?.("afterRealpath");
       st = await fs.stat(real, { bigint: true });
     } catch (e) {
       if (e instanceof UserError) throw e;
@@ -261,7 +265,9 @@ export class PathGuard {
     let chain: ChainDir[] = [];
     let chain0: ChainDir[] = [];
     try {
+      await testHooks.inputStep?.("beforeWalk");
       chain = await walkDirs(this.root, path.dirname(real));
+      await testHooks.inputStep?.("beforeOpen");
       chain0 = chain.map((d) => ({ p: d.p, id: d.id }));
       fh = await openInChain(chain, path.basename(real), INPUT_FLAGS);
     } catch (e) {
@@ -291,7 +297,9 @@ export class PathGuard {
       let again: string;
       let now: import("node:fs").BigIntStats;
       try {
+        await testHooks.inputStep?.("beforeRealpathAgain");
         again = await fs.realpath(abs);
+        await testHooks.inputStep?.("beforeLstatAgain");
         now = await fs.lstat(again, { bigint: true });
       } catch {
         throw this.changed(p);
@@ -308,15 +316,34 @@ export class PathGuard {
       } catch {
         throw this.changed(p);
       }
+      await testHooks.inputStep?.("beforeChainCheck");
       if (!sameFile(entry, st) || !(await chainIntact(chain))) throw this.changed(p);
       const actual = await procPath(fh);
       if (actual !== undefined && (actual.endsWith(" (deleted)") || !this.isInside(actual) || actual !== real)) throw this.changed(p);
+      // Without /proc every check above resolved names, so an ABA swap of a parent can fool all of them (each check
+      // lands in whichever phase it hits). The only sound proof: the inode-relative identity of the in-root entry.
+      if (actual === undefined && !(await this.anchoredMatch(chain, path.basename(real), st))) throw this.changed(p);
       return { real, fh };
     } catch (e) {
       await fh.close();
       throw e;
     } finally {
       await closeChain(chain);
+    }
+  }
+
+  /**
+   * True when the opened fd (identity `st`) is exactly the entry `name` of the verified chain's last directory, with the
+   * entry looked up inode-relative (anchor.ts) and the helper's directory identities equal to the pinned chain fds.
+   */
+  private async anchoredMatch(chain: ChainDir[], name: string, st: Ident): Promise<boolean> {
+    try {
+      const last = chain[chain.length - 1];
+      const a = await anchoredLstat(this.root, chain[0].id, path.relative(this.root, last.p), name);
+      if (a.isSymlink || !a.isFile || a.entry !== identKey(st)) return false;
+      return a.ids.length === chain.length && a.ids.every((k, i) => k === identKey(chain[i].id));
+    } catch {
+      return false;
     }
   }
 
@@ -420,6 +447,7 @@ export class PathGuard {
         }
         const actual = await procPath(fh);
         if (actual !== undefined && (actual.endsWith(" (deleted)") || path.dirname(actual) !== dir)) ok = false;
+        if (ok && actual === undefined && !(await this.anchoredMatch(chain, name, await fh.stat({ bigint: true })))) ok = false;
         moved = !ok;
         if (moved) {
           try {

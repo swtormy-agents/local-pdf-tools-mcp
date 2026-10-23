@@ -38,6 +38,8 @@ jobs:
         shell: bash
         env:
           N: ${{ inputs.iterations || '200' }}
+          # Live-race loop count per test (default 400): more chances per run to hit an ABA parent swap.
+          RACE_ITER: ${{ matrix.os == 'macos-latest' && '2000' || '1000' }}
         run: |
           fails=0
           for i in $(seq 1 "$N"); do
