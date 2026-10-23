@@ -107,7 +107,11 @@ async function walkDirs(root: string, dir: string): Promise<ChainDir[]> {
     return chain;
   } catch (e) {
     await closeChain(chain);
-    throw e;
+    // Anything but "gone" while walking means the chain was being modified (macOS reports e.g. EINVAL/EPERM/ENOTDIR
+    // variants for a directory renamed or swapped mid-walk): report it as a change, never as an unexpected error.
+    const code = errnoOf(e);
+    if (code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP") throw e;
+    throw Object.assign(looped(`directory changed while walking (${code ?? (e as Error).message})`), { cause: e });
   }
 }
 
@@ -123,6 +127,11 @@ async function chainIntact(chain: ChainDir[]): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** chainIntact on a path/identity copy (fds already closed); an empty chain (walk never finished) counts as changed. */
+async function chainIntactOrEmpty(chain: ChainDir[]): Promise<boolean> {
+  return chain.length > 0 && chainIntact(chain);
 }
 
 async function closeChain(chain: ChainDir[]): Promise<void> {
@@ -248,8 +257,10 @@ export class PathGuard {
     await testHooks.beforeInputOpen?.(real);
     let fh: fs.FileHandle;
     let chain: ChainDir[] = [];
+    let chain0: ChainDir[] = [];
     try {
       chain = await walkDirs(this.root, path.dirname(real));
+      chain0 = chain.map((d) => ({ p: d.p, id: d.id }));
       fh = await openInChain(chain, path.basename(real), INPUT_FLAGS);
     } catch (e) {
       await closeChain(chain);
@@ -258,6 +269,8 @@ export class PathGuard {
       if (code === "ENOENT" || code === "ENOTDIR") throw this.notFound(p, abs);
       if (code === "ELOOP" || code === "EMLINK") throw this.changed(p);
       if (code === "ENXIO" || code === "EISDIR") throw new UserError(`Input "${p}" is not a regular file.`, "INPUT_NOT_FILE");
+      // Any other errno while the verified chain no longer holds is a concurrent change, not an internal error.
+      if (code && !(await chainIntactOrEmpty(chain0))) throw this.changed(p);
       throw e;
     }
     try {
@@ -386,10 +399,12 @@ export class PathGuard {
       let fh: fs.FileHandle;
       let moved = false;
       let chain: ChainDir[] = [];
+      let chain0: ChainDir[] = [];
       try {
         // Create inside a directory verified component by component (no chdir), then verify the new fd BEFORE any
         // data is written: the chain is unchanged, <dir>/<name> is exactly our inode, and (Linux) /proc/self/fd agrees.
         chain = await walkDirs(this.root, dir);
+        chain0 = chain.map((d) => ({ p: d.p, id: d.id }));
         fh = await openInChain(chain, name, flags, 0o644);
         let ok = false;
         try {
@@ -414,7 +429,7 @@ export class PathGuard {
         if (e instanceof UserError) throw e;
         const code = (e as NodeJS.ErrnoException).code;
         if (code === "EEXIST" || code === "ELOOP") continue;
-        if (code === "ENOENT" || code === "ENOTDIR") {
+        if (code === "ENOENT" || code === "ENOTDIR" || (code && !(await chainIntactOrEmpty(chain0)))) {
           throw new UserError(`Output directory ${dir} disappeared or was replaced while converting. Nothing was written. Make sure nothing else modifies the folder.`, "OUTPUT_DIR_CHANGED");
         }
         throw new UserError(`Could not create output file ${target}: ${(e as Error).message}`, "WRITE_FAILED");
