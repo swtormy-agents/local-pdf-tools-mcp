@@ -231,10 +231,12 @@ function idle(c: ChildProcess, busy: boolean): void {
 function tryFrame(): void {
   for (;;) {
   if (!current || buffered < 8) return;
-  const all = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks);
-  chunks = [all];
-  const hl = all.readUInt32LE(0), pl = all.readUInt32LE(4);
-  if (all.length < 8 + hl + pl) return;
+  // Read the frame length from the prefix and join the chunks only once the whole frame has arrived: joining on every
+  // pipe chunk copied the buffer again for each 64 KiB of a large file read (quadratic: ~3 s for a 39 MB input).
+  if (chunks[0].length < 8) chunks = [Buffer.concat(chunks)];
+  const hl = chunks[0].readUInt32LE(0), pl = chunks[0].readUInt32LE(4);
+  if (buffered < 8 + hl + pl) return;
+  const all = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, buffered);
   const h = JSON.parse(all.subarray(8, 8 + hl).toString()) as FsHeader;
   const p = Buffer.from(all.subarray(8 + hl, 8 + hl + pl));
   const rest = all.subarray(8 + hl + pl);

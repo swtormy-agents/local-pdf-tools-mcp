@@ -238,7 +238,9 @@ describe("QA B2: /ObjStm Flate bomb (6.2 GB inflated) -> TOO_LARGE decompressed,
       ["pdf_organize", { input: "bomb.pdf", order: [1], outputDir: "bomb" }],
     ];
     for (const [tool, args] of calls) {
+      const tc = Date.now();
       const m = await expectError(tool, args, "TOO_LARGE");
+      console.error(`ObjStm bomb: ${tool} ${Date.now() - tc} ms`);
       expect(m).toMatch(/more than 500 MB of decompressed data/);
       expect(m).toMatch(/decompression bomb/);
       expect(m).not.toMatch(/max 100 MB per file/);
