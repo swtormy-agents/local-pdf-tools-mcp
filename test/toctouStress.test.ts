@@ -85,8 +85,8 @@ describe.skipIf(realPlatform === "win32")("TOCTOU stress (QA repro, symlinks nee
       const isDir = (p: string) => fs.lstat(p).then((s) => s.isDirectory(), () => false);
       const real = (await isDir(dir)) ? dir : dir + "_real";
       const leaked = await fs.readdir(outside);
-      if (!sim) expect(leaked, JSON.stringify(res)).toEqual([]);
-      else {
+      if (!sim && realPlatform === "linux") expect(leaked, JSON.stringify(res)).toEqual([]);
+      {
         // Without openat()/chdir (unavailable in Node / process-global) a parent swap at the exact open can still
         // create an EMPTY file outside off Linux: the fd is verified before any byte is written, so it is never written
         // to and never reported as success. Linux anchors the create via /proc/self/fd/<dirfd> (case above).
