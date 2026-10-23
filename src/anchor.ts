@@ -93,14 +93,18 @@ function write(m, data) {
   for (let i = 0; i < 10000; i++) {
     const name = i === 0 ? m.base + "." + m.ext : m.base + "-" + i + "." + m.ext;
     let fd;
+    // N4: announce the name before creating it; if killed before the id frame, the server knows a file may exist.
+    send({ progress: true, name });
+    if (m.testPauseBeforeCreateMs) Atomics.wait(sab, 0, 0, m.testPauseBeforeCreateMs);
     try { fd = fs.openSync(name, C.O_WRONLY | C.O_CREAT | C.O_EXCL | NOFOLLOW, 0o644); } catch (e) { if (e.code === "EEXIST" || e.code === "ELOOP") continue; throw e; }
     const st = fs.fstatSync(fd, B);
+    if (m.testPauseAfterCreateMs) Atomics.wait(sab, 0, 0, m.testPauseAfterCreateMs);
     let open = true;
     try {
       if (!same(name, st) || !under(ids)) throw E("ECHANGED");
       // F7: tell the server which file now exists (relative name + dev:ino) BEFORE any byte is written, so it can have
       // a respawned helper remove it if this helper is killed or times out.
-      send({ progress: true, name, id: id(st) });
+      send({ progress: true, name, id: id(st), created: true });
       let o = 0;
       const half = m.testSlowMs ? data.length >> 1 : data.length;
       while (o < half) o += fs.writeSync(fd, data, o, half - o);
@@ -119,21 +123,47 @@ function write(m, data) {
   }
   throw E("EEXHAUST");
 }
-// F7 cleanup after a killed/timed-out write: walk to the parent with the same dev/ino checks (no symlink followed),
-// then, relative to that verified cwd only: rename the name to a private temp name, lstat it, and unlink it only if it
-// is not a link and has the reported dev:ino and the cwd is still under the root; otherwise rename it back.
+// F7 cleanup after a killed/timed-out write (QA N1/N2/N5): walk to the parent with the same dev/ino checks (no symlink
+// followed); every step below is a single name relative to that verified cwd. Nothing is ever renamed onto a name that
+// may hold someone else's file, and nothing is deleted unless it is proven to be the inode the old helper created.
+const NOLINK = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "ENOSYS", "EINVAL", "EMLINK"]);
+function tmpName() { return ".lpt-cleanup-" + require("crypto").randomBytes(16).toString("hex"); }
+function claim() {
+  // A fresh unpredictable name, created exclusively (O_EXCL, EEXIST -> retry): it holds only our own empty placeholder.
+  for (let i = 0; i < 100; i++) {
+    const t = tmpName();
+    try { fs.closeSync(fs.openSync(t, C.O_WRONLY | C.O_CREAT | C.O_EXCL | NOFOLLOW, 0o600)); return t; } catch (e) { if (e.code !== "EEXIST") throw e; }
+  }
+  throw E("EEXHAUST");
+}
 function cleanup(m) {
   const ids = enter(m, false);
+  if (!under(ids)) throw E("ECHANGED"); // N5: verified before anything is touched
   let l;
   try { l = fs.lstatSync(m.name, B); } catch (e) { if (e.code === "ENOENT") return [{ ok: true, gone: true }]; throw e; }
   if (l.isSymbolicLink() || id(l) !== m.id) throw E("ECHANGED");
+  // Restore (link back) needs hard links. Probe them first; if unsupported (FAT/exFAT, some network shares) do nothing.
+  const t = claim();
+  try {
+    const probe = tmpName();
+    if (m.testLinkError) throw E(m.testLinkError);
+    fs.linkSync(t, probe); fs.unlinkSync(probe);
+  } catch (e) {
+    fs.unlinkSync(t);
+    if (NOLINK.has(e.code)) throw E("ENOLINKSUPPORT");
+    throw e;
+  }
   if (m.testPauseMs) Atomics.wait(sab, 0, 0, m.testPauseMs);
-  const tmp = ".lpt-cleanup-" + process.pid + "-" + Date.now();
-  fs.renameSync(m.name, tmp);
-  const t = fs.lstatSync(tmp, B);
-  if (t.isSymbolicLink() || id(t) !== m.id || !under(ids)) { try { fs.renameSync(tmp, m.name); } catch {} throw E("ECHANGED"); }
-  fs.unlinkSync(tmp);
-  return [{ ok: true }];
+  if (!under(ids)) { fs.unlinkSync(t); throw E("ECHANGED"); }
+  // Atomic move of whatever is at the name now onto our own placeholder (replaces only the placeholder).
+  try { fs.renameSync(m.name, t); } catch (e) { try { fs.unlinkSync(t); } catch {} if (e.code === "ENOENT") return [{ ok: true, gone: true }]; throw e; }
+  if (m.testPauseAfterMoveMs) Atomics.wait(sab, 0, 0, m.testPauseAfterMoveMs);
+  const x = fs.lstatSync(t, B);
+  if (!x.isSymbolicLink() && id(x) === m.id && under(ids)) { fs.unlinkSync(t); return [{ ok: true }]; }
+  // Not ours (swapped meanwhile) or the folder left the root: put it back without overwriting anything (N1).
+  try { fs.linkSync(t, m.name); } catch (e) { throw E("ERESTORE", { tmp: t, cause: e.code }); }
+  fs.unlinkSync(t);
+  throw E("ECHANGED");
 }
 function handle(m, p) {
   if (m.op === "cleanup") return cleanup(m);
@@ -149,13 +179,13 @@ for (;;) {
   const m = JSON.parse(readFull(hl).toString());
   const p = pl ? readFull(pl) : Buffer.alloc(0);
   let r;
-  try { r = handle(m, p); } catch (e) { r = [{ error: (e && e.code) || "EUNKNOWN", size: e && e.size, nlink: e && e.nlink }]; }
+  try { r = handle(m, p); } catch (e) { r = [{ error: (e && e.code) || "EUNKNOWN", size: e && e.size, nlink: e && e.nlink, tmp: e && e.tmp, cause: e && e.cause }]; }
   try { process.chdir(os.tmpdir()); } catch {}
   send(r[0], r[1]);
 }
 `;
 
-export type FsHeader = { ok?: boolean; error?: string; name?: string; size?: number; nlink?: number; progress?: boolean; id?: string; gone?: boolean };
+export type FsHeader = { ok?: boolean; error?: string; name?: string; size?: number; nlink?: number; progress?: boolean; id?: string; gone?: boolean; created?: boolean; tmp?: string; cause?: string };
 export type FsReply = { h: FsHeader; p: Buffer };
 
 /** Per-request timeout (ms). Exported setter for tests. */

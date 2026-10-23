@@ -130,15 +130,19 @@ describe.skipIf(!SYMLINKS)("QA87 race repro (junctions on Windows)", () => {
         try {
           await Promise.all(Array.from({ length: CONC }, worker));
         } finally {
+          const gone = new Promise((r) => sw.once("exit", r));
           sw.kill("SIGKILL");
+          await gone;
         }
-        await new Promise((r) => setTimeout(r, 200));
         const leaked = await extra(outside);
         const line = JSON.stringify({ MODE, OP, N, CONC, noProc: INNER, ...res, outsideCreated: leaked.length });
         console.log("megan87", line);
         expect(res.outsideReads, line).toBe(0);
         expect(leaked, line).toEqual([]);
         const allowed = ["INPUT_NOT_FOUND", "SYMLINK_OUTSIDE_ROOT", "PATH_CHANGED", "INPUT_NOT_FILE", "OUTPUT_DIR_CHANGED"];
+        // Windows: creating a file in a folder that is being renamed/deleted by the swapper can fail with EPERM/EACCES
+        // ("delete pending"), which the server reports as WRITE_FAILED. Nothing is created; the invariants above hold.
+        if (process.platform === "win32") allowed.push("WRITE_FAILED");
         for (const k of Object.keys(res.codes)) expect(allowed, line).toContain(k);
       }, 1_200_000);
 });

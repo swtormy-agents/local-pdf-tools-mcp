@@ -50,6 +50,7 @@ export const testHooks: {
   /** Extra fields for helper write/cleanup requests (testSlowMs, testPauseMs). */
   writeExtra?: Record<string, unknown>;
   cleanupExtra?: Record<string, unknown>;
+  onWriteProgress?: (h: FsHeader) => void;
   /** Input side: called after the helper request finished. */
   afterInputOpen?: (real: string) => Promise<void> | void;
   /** Input side: called at named steps ("afterRealpath", "beforeHelper"). */
@@ -308,22 +309,38 @@ export class PathGuard {
     try {
       await testHooks.beforeOpen?.(dir);
       const parts = this.partsOf(dir);
+      let announced: string | undefined;
       let created: { name: string; id: string } | undefined;
       r = await fsCall({ op: "write", root: this.root, rootId: this.rootId, parts, base, ext, ...testHooks.writeExtra }, bytes, (h) => {
-        created = { name: h.name!, id: h.id! };
+        if (h.created) created = { name: h.name!, id: h.id! };
+        else announced = h.name;
+        testHooks.onWriteProgress?.(h);
       }).catch(async (e) => {
-        if (!created) throw this.helperFailed(e, `Writing to "${shown}"`);
-        // F7: the killed helper had already created `created.name`; a fresh helper removes it if it is still ours.
+        if (!created) {
+          // N4: killed between announcing and confirming the create: we cannot prove a file there is ours, so it is
+          // never deleted.
+          throw this.helperFailed(
+            e,
+            `Writing to "${shown}"`,
+            announced ? `An empty file "${shown}/${announced}" may remain (it was not removed because it could not be verified as this server's file); delete it manually if present.` : undefined,
+          );
+        }
+        // F7: a fresh helper removes `created.name` only if it is still the inode the killed helper created.
         const where = `"${shown}/${created.name}"`;
         const c = await fsCall({ op: "cleanup", root: this.root, rootId: this.rootId, parts, ...created, ...testHooks.cleanupExtra }).catch(
           (e2: NodeJS.ErrnoException) => ({ h: { error: e2.code ?? "EHELPER" } as FsHeader }),
         );
+        const err = c.h.error;
         throw this.helperFailed(
           e,
           `Writing to "${shown}"`,
-          c.h.error
-            ? `The partially written file ${where} could not be removed (${c.h.error}) and may remain; delete it manually.`
-            : "The partially written output file was removed.",
+          !err
+            ? "The partially written output file was removed."
+            : err === "ENOLINKSUPPORT"
+              ? `The partially written file ${where} may remain: this filesystem has no hard links, which the safe cleanup needs, so it was not touched; delete it manually.`
+              : err === "ERESTORE"
+                ? `The file at ${where} had been replaced by another file, which could not be put back because the name is taken again (${c.h.cause}); it was kept as "${shown}/${c.h.tmp}". Nothing was deleted; check both files.`
+                : `The partially written file ${where} could not be removed (${err}) and may remain; delete it manually${err === "EHELPER" || err === "FS_TIMEOUT" ? ` (an empty temporary file "${shown}/.lpt-cleanup-..." may also remain)` : ""}.`,
         );
       });
     } finally {

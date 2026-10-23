@@ -23,6 +23,8 @@ const N = Number(process.env.MOVES_N ?? 1000);
 const C = 32;
 const PDF = "%PDF-1.7\n%%EOF\n";
 const ALLOWED = ["INPUT_NOT_FOUND", "SYMLINK_OUTSIDE_ROOT", "PATH_CHANGED", "INPUT_NOT_FILE", "OUTPUT_DIR_CHANGED", "PATH_OUTSIDE_ROOT"];
+// Windows: EPERM/EACCES ("delete pending") on create in a folder being renamed -> WRITE_FAILED; nothing is created.
+if (process.platform === "win32") ALLOWED.push("WRITE_FAILED");
 
 const scripts = {
   out: `fs.mkdirSync(O+"/mv",{recursive:true});for(;;){try{fs.renameSync(R+"/a/rin",O+"/mv/rin");fs.renameSync(O+"/mv/rin",R+"/a/rin");}catch(e){}}`,
@@ -78,9 +80,10 @@ describe("F9: folders moved into / out of the root during operations", () => {
         try {
           await Promise.all(Array.from({ length: C }, worker));
         } finally {
+          const gone = new Promise((r) => sw.once("exit", r));
           sw.kill("SIGKILL");
+          await gone;
         }
-        await new Promise((r) => setTimeout(r, 200));
         const line = JSON.stringify({ MODE, OP, N, ...res });
         console.log("moves", line);
         for (const k of Object.keys(res.codes)) expect(ALLOWED, line).toContain(k);

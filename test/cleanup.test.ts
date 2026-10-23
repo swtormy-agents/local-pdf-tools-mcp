@@ -93,7 +93,8 @@ describe("F7: no output left after timeout or helper crash", () => {
     expect(await fs.readFile(path.join(outside, "d", "x.pdf"), "utf8")).toBe("ours");
   });
 
-  it("output folder moved out of the root during the check pause: cleanup refuses, outside untouched", async () => {
+  // Windows refuses to rename a folder that is a process's current directory (EBUSY), so this race cannot happen there.
+  it.skipIf(process.platform === "win32")("output folder moved out of the root during the check pause: cleanup refuses, outside untouched", async () => {
     const { root, outside, guard } = await setup();
     const f = path.join(root, "o", "x.pdf");
     await fs.writeFile(f, "ours");
@@ -103,5 +104,82 @@ describe("F7: no output left after timeout or helper crash", () => {
     await fs.rename(path.join(root, "o"), path.join(outside, "moved"));
     expect((await c).h.error).toBe("ECHANGED");
     expect(await fs.readFile(path.join(outside, "moved", "x.pdf"), "utf8")).toBe("ours");
+    expect(await fs.readdir(path.join(outside, "moved"))).toEqual(["x.pdf"]); // N5: nothing renamed there
+  });
+
+  const cleanupOf = (guard: PathGuard, name: string, id: string, extra: object = {}) =>
+    fsCall({ op: "cleanup", root: guard.root, rootId: (guard as any).rootId, parts: ["o"], name, id, ...extra });
+  const idOf = async (f: string) => {
+    const st = await fs.stat(f, { bigint: true });
+    return `${st.dev}:${st.ino}`;
+  };
+
+  it("N1 (Megan qa3e/b): foreign file swapped in, and the name re-created while moved aside: both foreign files survive", async () => {
+    const { root, guard } = await setup();
+    const f = path.join(root, "o", "x.pdf");
+    await fs.writeFile(f, "ours");
+    const id = await idOf(f);
+    const c = cleanupOf(guard, "x.pdf", id, { testPauseMs: 400, testPauseAfterMoveMs: 600 });
+    await new Promise((r) => setTimeout(r, 150));
+    await fs.rename(f, path.join(root, "ours.bak"));
+    await fs.writeFile(f, "FOREIGN-1");
+    let made = false;
+    for (let i = 0; i < 300 && !made; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+      made = await fs.writeFile(f, "FOREIGN-2", { flag: "wx" }).then(() => true, () => false);
+    }
+    expect(made).toBe(true);
+    const r = await c;
+    expect(r.h.error).toBe("ERESTORE");
+    expect(r.h.tmp).toMatch(/^\.lpt-cleanup-[0-9a-f]{32}$/);
+    const names = await fs.readdir(path.join(root, "o"));
+    const content = await Promise.all(names.map((n) => fs.readFile(path.join(root, "o", n), "utf8")));
+    expect(content.sort()).toEqual(["FOREIGN-1", "FOREIGN-2"]);
+  });
+
+  it("N2: random temp name; existing (old-style or foreign) .lpt-cleanup-* files are never touched", async () => {
+    const { root, guard } = await setup();
+    const f = path.join(root, "o", "x.pdf");
+    await fs.writeFile(f, "ours");
+    for (let i = 0; i < 50; i++) await fs.writeFile(path.join(root, "o", `.lpt-cleanup-${i}-${Date.now() + i}`), "FOREIGN");
+    const before = (await fs.readdir(path.join(root, "o"))).filter((n) => n !== "x.pdf").sort();
+    expect((await cleanupOf(guard, "x.pdf", await idOf(f))).h.error).toBeUndefined();
+    const after = (await fs.readdir(path.join(root, "o"))).sort();
+    expect(after).toEqual(before);
+    for (const n of after) expect(await fs.readFile(path.join(root, "o", n), "utf8")).toBe("FOREIGN");
+  });
+
+  for (const code of ["EPERM", "ENOTSUP"])
+    it(`no hard links (${code}, e.g. FAT/exFAT): cleanup does nothing, message says the file may remain`, async () => {
+      const { root, guard } = await setup();
+      const f = path.join(root, "o", "x.pdf");
+      await fs.writeFile(f, "ours");
+      const r = await cleanupOf(guard, "x.pdf", await idOf(f), { testLinkError: code });
+      expect(r.h.error).toBe("ENOLINKSUPPORT");
+      expect(await fs.readdir(path.join(root, "o"))).toEqual(["x.pdf"]);
+      expect(await fs.readFile(f, "utf8")).toBe("ours");
+      testHooks.writeExtra = { testSlowMs: 5000 };
+      testHooks.cleanupExtra = { testLinkError: code };
+      setFsTimeout(800);
+      const e: any = await writePdf(guard, path.join(root, "o"), "t", DATA).catch((x) => x);
+      expect(e.code).toBe("FS_TIMEOUT");
+      expect(e.message).toContain('"o/t.pdf" may remain');
+      expect(e.message).toContain("no hard links");
+      expect((await fs.readdir(path.join(root, "o"))).sort()).toEqual(["t.pdf", "x.pdf"]);
+    });
+
+  it("N4: helper killed after create but before confirming it: the file is not deleted, message says it may remain", async () => {
+    const { root, guard } = await setup();
+    testHooks.writeExtra = { testPauseAfterCreateMs: 5000 };
+    testHooks.onWriteProgress = (h) => {
+      if (!h.created) setTimeout(() => process.kill(helperPid()!, "SIGKILL"), 300);
+    };
+    const e: any = await writePdf(guard, path.join(root, "o"), "k", DATA).catch((x) => x);
+    testHooks.onWriteProgress = undefined;
+    expect(e.code).toBe("FS_HELPER_FAILED");
+    expect(e.message).toContain('An empty file "o/k.pdf" may remain');
+    expect(e.message).not.toContain("No output file was created");
+    expect(await fs.readdir(path.join(root, "o"))).toEqual(["k.pdf"]);
+    expect((await fs.stat(path.join(root, "o", "k.pdf"))).size).toBe(0);
   });
 });

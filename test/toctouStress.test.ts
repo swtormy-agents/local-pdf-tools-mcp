@@ -78,11 +78,14 @@ describe("TOCTOU stress (QA repro, junctions on Windows)", () => {
           }
         }
       } finally {
-        sw.kill();
+        // Wait for the swapper to really exit (on Windows kill is asynchronous and it kept renaming during the check).
+        const gone = new Promise((r) => sw.once("exit", r));
+        sw.kill("SIGKILL");
+        await gone;
       }
-      await new Promise((r) => setTimeout(r, 100));
-      // The swapper may be killed mid-cycle: the inside folder is either at its name or at <name>_real.
-      const isDir = (p: string) => fs.lstat(p).then((s) => s.isDirectory(), () => false);
+      // The swapper may be killed mid-cycle: the inside folder is either at its name or at <name>_real (the name may
+      // then be a link; on Windows lstat reports a junction as a link, not a directory).
+      const isDir = (p: string) => fs.lstat(p).then((s) => s.isDirectory() && !s.isSymbolicLink(), () => false);
       const real = (await isDir(dir)) ? dir : dir + "_real";
       const leaked = await fs.readdir(outside);
       expect(leaked, JSON.stringify(res)).toEqual([]);
