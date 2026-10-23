@@ -433,7 +433,10 @@ export class PathGuard {
         if (e instanceof UserError) throw e;
         const code = (e as NodeJS.ErrnoException).code;
         if (code === "EEXIST" || code === "ELOOP") continue;
-        if (code === "ENOENT" || code === "ENOTDIR" || (code && !(await chainIntactOrEmpty(chain0)))) {
+        // Only genuine "cannot write here" errors are WRITE_FAILED. Any other errno means the path was raced: on platforms
+        // without an openat equivalent a folder swapped and restored between the walk and open() leaves the chain intact.
+        const genuine = code === "EACCES" || code === "EPERM" || code === "ENOSPC" || code === "EROFS" || code === "EDQUOT" || code === "EMFILE" || code === "ENFILE";
+        if (code === "ENOENT" || code === "ENOTDIR" || (code && (!genuine || !(await chainIntactOrEmpty(chain0))))) {
           throw new UserError(`Output directory ${dir} disappeared or was replaced while converting. Nothing was written. Make sure nothing else modifies the folder.`, "OUTPUT_DIR_CHANGED");
         }
         throw new UserError(`Could not create output file ${target}: ${(e as Error).message}`, "WRITE_FAILED");
