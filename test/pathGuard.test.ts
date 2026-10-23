@@ -128,7 +128,7 @@ describe.skipIf(!SYMLINKS)("TOCTOU: output dir swapped for a symlink (skipped on
     expect(await fs.readdir(out)).toEqual([]);
   });
 
-  it("never deletes by path if the swap happens between the check and open(): empties the stray file and reports it", async () => {
+  it("swap between the check and open(): nothing is created outside the root, nothing deleted (fix/input-race)", async () => {
     const { g, dir, out, swap } = await setup();
     const victim = path.join(out, "keep.png");
     await fs.writeFile(victim, "VICTIM");
@@ -141,15 +141,14 @@ describe.skipIf(!SYMLINKS)("TOCTOU: output dir swapped for a symlink (skipped on
     } finally {
       testHooks.beforeOpen = undefined;
     }
-    expect(err?.code).toBe("OUTPUT_DIR_CHANGED_FILE_LEFT");
-    expect(err.message).not.toMatch(/was removed/);
+    // The file is created relative to the directory actually entered, so the swapped-in symlink is detected before
+    // anything is created outside the root.
+    expect(err?.code).toBe("OUTPUT_DIR_CHANGED");
     expect(await fs.readFile(victim, "utf8")).toBe("VICTIM");
-    // The stray file outside the root holds no data.
-    expect((await fs.stat(path.join(out, "img.png"))).size).toBe(0);
-    if (process.platform === "linux") expect(err.message).toContain(path.join(out, "img.png"));
+    expect(await fs.readdir(out)).toEqual(["keep.png"]);
   });
 
-  it("reports honestly when the dir is swapped back right after open()", async () => {
+  it("swap before open() and back right after it: still nothing created outside the root", async () => {
     const { g, dir, out, swap } = await setup();
     const moved = path.join(path.dirname(dir), "out-moved");
     testHooks.beforeOpen = swap;
@@ -166,10 +165,8 @@ describe.skipIf(!SYMLINKS)("TOCTOU: output dir swapped for a symlink (skipped on
       testHooks.beforeOpen = undefined;
       testHooks.afterOpen = undefined;
     }
-    expect(err?.code).toBe("OUTPUT_DIR_CHANGED_FILE_LEFT");
-    expect(err.message).not.toMatch(/was removed/);
-    expect(await fs.readdir(out)).toEqual(["img.png"]);
-    expect((await fs.stat(path.join(out, "img.png"))).size).toBe(0);
+    expect(err?.code).toBe("OUTPUT_DIR_CHANGED");
+    expect(await fs.readdir(out)).toEqual([]);
     expect(await fs.readdir(dir)).toEqual([]);
   });
 
