@@ -21,6 +21,7 @@ afterEach(() => {
   testHooks.beforeInputOpen = undefined;
   testHooks.afterInputOpen = undefined;
   testHooks.noProcFd = undefined;
+  testHooks.inputStep = undefined;
 });
 
 async function setup() {
@@ -64,6 +65,33 @@ describe.skipIf(!SYMLINKS)("input TOCTOU: folder swapped for a symlink to outsid
       await fs.symlink(path.join(outside, "doc.pdf"), file);
     };
     await expect(readInputs(guard, ["rin/doc.pdf"], "pdf")).rejects.toMatchObject({ code: "PATH_CHANGED" });
+  });
+  // The macOS CI outsideReads:1 window, made deterministic: every name-based check lands in the phase that agrees with
+  // the outside fd (stat after realpath, open, lstat) and the chain checks land in the genuine phase. Only the
+  // inode-relative anchored lookup (anchor.ts) tells the outside fd apart from the in-root entry.
+  for (const noProc of [true, false]) it(`ABA parent swap timed around every name-based check is rejected${noProc ? " (no /proc)" : ""}`, async () => {
+    const { guard, swapToOutside, swapBack } = await setup();
+    testHooks.noProcFd = noProc;
+    const plan: Record<string, () => Promise<void>> = {
+      afterRealpath: swapToOutside,
+      beforeWalk: swapBack,
+      beforeOpen: swapToOutside,
+      beforeRealpathAgain: swapBack,
+      beforeLstatAgain: swapToOutside,
+      beforeChainCheck: swapBack,
+    };
+    const steps: string[] = [];
+    testHooks.inputStep = async (s) => {
+      steps.push(s);
+      await plan[s]?.();
+    };
+    const r = await readInputs(guard, ["rin/doc.pdf"], "pdf").then(
+      (f) => Buffer.from(f[0].bytes).toString(),
+      (e) => e,
+    );
+    expect(r).not.toBe("%PDF-1.7 OUTSIDE SECRET");
+    if (process.platform === "linux" || noProc) expect(r).toMatchObject({ code: "PATH_CHANGED" });
+    if (noProc) expect(steps).toEqual(Object.keys(plan));
   });
   it.skipIf(process.platform === "win32")("a FIFO swapped in never blocks the read", async () => {
     const { root, guard } = await setup();
