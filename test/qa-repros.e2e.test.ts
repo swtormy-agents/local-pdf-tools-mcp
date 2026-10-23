@@ -247,33 +247,8 @@ describe("QA B2: /ObjStm Flate bomb (6.2 GB inflated) -> TOO_LARGE decompressed,
     }
     const grewMiB = (process.resourceUsage().maxRSS - peak0) / 1024;
     console.error(`ObjStm bomb: peak RSS grew by ${grewMiB.toFixed(0)} MiB in ${Date.now() - t0} ms`);
-    // Diagnostic (macOS 2.1 GB vs Linux ~230 MB): a control that only allocates and drops 500 MiB in 64 KiB chunks,
-    // like the core's pako counter, retaining nothing. Measured after the bomb (maxRSS is monotonic) by a worker thread
-    // that samples the process RSS every 2 ms.
-    {
-      const { Worker } = await import("node:worker_threads");
-      const w = new Worker(`const {parentPort}=require("worker_threads");let m=0;const t=setInterval(()=>{m=Math.max(m,process.memoryUsage.rss())},2);parentPort.on("message",()=>{clearInterval(t);parentPort.postMessage(m)});`, { eval: true });
-      await new Promise((r) => setTimeout(r, 100));
-      const r0 = process.memoryUsage.rss(), m0 = process.resourceUsage().maxRSS;
-      let sink = 0;
-      for (let k = 0; k < 8000; k++) { const c = new Uint8Array(64 * 1024); c[k % 65536] = 1; sink += c[0]; }
-      await new Promise((r) => setTimeout(r, 50));
-      const r1 = process.memoryUsage.rss(), m1 = process.resourceUsage().maxRSS;
-      // Second control: exactly the core's counter (pako, 64 KiB chunks, abort past 500 MiB) on the bomb stream itself.
-      const pako = (await import("pako")).default;
-      const z = deflateBombRepeated(6.2e9);
-      let n = 0;
-      const inf = new pako.Inflate({ chunkSize: 64 * 1024 });
-      inf.onData = (c: Uint8Array) => { n += c.length; if (n > 500 * 2 ** 20) throw new Error("cap"); };
-      inf.onEnd = () => {};
-      try { inf.push(z, true); } catch {}
-      console.error(`ObjStm bomb control 2: pako counter stopped at ${(n / 2 ** 20).toFixed(0)} MiB, rss +${((process.memoryUsage.rss() - r1) / 2 ** 20).toFixed(0)} MiB, maxRSS +${((process.resourceUsage().maxRSS - m1) / 1024).toFixed(0)} MiB`);
-      await new Promise((r) => setTimeout(r, 50));
-      w.postMessage(0);
-      const peak = await new Promise<number>((r) => w.once("message", r));
-      await w.terminate();
-      console.error(`ObjStm bomb control (${process.platform}): 500 MiB churn in 64 KiB chunks: sampled RSS peak +${((peak - r0) / 2 ** 20).toFixed(0)} MiB, maxRSS +${((process.resourceUsage().maxRSS - m0) / 1024).toFixed(0)} MiB, rss now ${(process.memoryUsage.rss() / 2 ** 20).toFixed(0)} MiB, maxRSS ${(process.resourceUsage().maxRSS / 1024).toFixed(0)} MiB ${sink}`);
-    }
+    // macOS showed +2.1 GB here (and FS_TIMEOUT on Node 20): the server re-joined every pipe chunk of the 39 MB read
+    // (anchor.ts tryFrame, quadratic copy; macOS kept the garbage resident). Fixed in the MCP; core 047da26 unchanged.
     expect(Date.now() - t0).toBeLessThan(90_000);
     expect(grewMiB, `peak RSS grew by ${grewMiB.toFixed(0)} MiB`).toBeLessThan(700); // QA saw 6.2 GB before the cap
     await expect(fs.readdir(path.join(root, "bomb"))).resolves.toEqual([]);

@@ -70,8 +70,10 @@ describe("F7: no output left after timeout or helper crash", () => {
     await fs.writeFile(f, "ours");
     const st = await fs.stat(f, { bigint: true });
     await fs.writeFile(path.join(outside, "secret.pdf"), "SECRET");
-    const c = fsCall({ op: "cleanup", root: guard.root, rootId: (guard as any).rootId, parts: ["o"], name: "x.pdf", id: `${st.dev}:${st.ino}`, testPauseMs: 600 });
-    await new Promise((r) => setTimeout(r, 200));
+    let atPause!: () => void;
+    const paused = new Promise<void>((r) => (atPause = r));
+    const c = fsCall({ op: "cleanup", root: guard.root, rootId: (guard as any).rootId, parts: ["o"], name: "x.pdf", id: `${st.dev}:${st.ino}`, testPauseMs: 600 }, undefined, (h) => h.paused === "check" && atPause());
+    await paused; // the helper has checked the id and is pausing before it moves the name
     await fs.rename(f, path.join(root, "ours.bak"));
     await fs.link(path.join(outside, "secret.pdf"), f).catch(() => fs.writeFile(f, "SECRET"));
     expect((await c).h.error).toBe("ECHANGED");
@@ -99,16 +101,18 @@ describe("F7: no output left after timeout or helper crash", () => {
     const f = path.join(root, "o", "x.pdf");
     await fs.writeFile(f, "ours");
     const st = await fs.stat(f, { bigint: true });
-    const c = fsCall({ op: "cleanup", root: guard.root, rootId: (guard as any).rootId, parts: ["o"], name: "x.pdf", id: `${st.dev}:${st.ino}`, testPauseMs: 600 });
-    await new Promise((r) => setTimeout(r, 200));
+    let atPause!: () => void;
+    const paused = new Promise<void>((r) => (atPause = r));
+    const c = fsCall({ op: "cleanup", root: guard.root, rootId: (guard as any).rootId, parts: ["o"], name: "x.pdf", id: `${st.dev}:${st.ino}`, testPauseMs: 600 }, undefined, (h) => h.paused === "check" && atPause());
+    await paused; // the helper has checked the id and is pausing before it moves the name
     await fs.rename(path.join(root, "o"), path.join(outside, "moved"));
     expect((await c).h.error).toBe("ECHANGED");
     expect(await fs.readFile(path.join(outside, "moved", "x.pdf"), "utf8")).toBe("ours");
     expect(await fs.readdir(path.join(outside, "moved"))).toEqual(["x.pdf"]); // N5: nothing renamed there
   });
 
-  const cleanupOf = (guard: PathGuard, name: string, id: string, extra: object = {}) =>
-    fsCall({ op: "cleanup", root: guard.root, rootId: (guard as any).rootId, parts: ["o"], name, id, ...extra });
+  const cleanupOf = (guard: PathGuard, name: string, id: string, extra: object = {}, onPause?: (p: string) => void) =>
+    fsCall({ op: "cleanup", root: guard.root, rootId: (guard as any).rootId, parts: ["o"], name, id, ...extra }, undefined, (h) => h.paused && onPause?.(h.paused));
   const idOf = async (f: string) => {
     const st = await fs.stat(f, { bigint: true });
     return `${st.dev}:${st.ino}`;
@@ -119,8 +123,10 @@ describe("F7: no output left after timeout or helper crash", () => {
     const f = path.join(root, "o", "x.pdf");
     await fs.writeFile(f, "ours");
     const id = await idOf(f);
-    const c = cleanupOf(guard, "x.pdf", id, { testPauseMs: 400, testPauseAfterMoveMs: 600 });
-    await new Promise((r) => setTimeout(r, 150));
+    let atPause!: () => void;
+    const paused = new Promise<void>((r) => (atPause = r));
+    const c = cleanupOf(guard, "x.pdf", id, { testPauseMs: 400, testPauseAfterMoveMs: 600 }, (p) => p === "check" && atPause());
+    await paused;
     await fs.rename(f, path.join(root, "ours.bak"));
     await fs.writeFile(f, "FOREIGN-1");
     let made = false;

@@ -163,11 +163,11 @@ function cleanup(m) {
     if (NOLINK.has(e.code)) throw E("ENOLINKSUPPORT");
     throw e;
   }
-  if (m.testPauseMs) Atomics.wait(sab, 0, 0, m.testPauseMs);
+  if (m.testPauseMs) { send({ progress: true, name: m.name, paused: "check" }); Atomics.wait(sab, 0, 0, m.testPauseMs); }
   if (!under(ids)) { fs.unlinkSync(t); throw E("ECHANGED"); }
   // Atomic move of whatever is at the name now onto our own placeholder (replaces only the placeholder).
   try { fs.renameSync(m.name, t); } catch (e) { try { fs.unlinkSync(t); } catch {} if (e.code === "ENOENT") return [{ ok: true, gone: true }]; throw e; }
-  if (m.testPauseAfterMoveMs) Atomics.wait(sab, 0, 0, m.testPauseAfterMoveMs);
+  if (m.testPauseAfterMoveMs) { send({ progress: true, name: m.name, paused: "moved" }); Atomics.wait(sab, 0, 0, m.testPauseAfterMoveMs); }
   const x = fs.lstatSync(t, B);
   if (!x.isSymbolicLink() && id(x) === m.id && under(ids)) { fs.unlinkSync(t); return [{ ok: true }]; }
   // Not ours (swapped meanwhile) or the folder left the root: put it back without overwriting anything (N1).
@@ -195,7 +195,7 @@ for (;;) {
 }
 `;
 
-export type FsHeader = { ok?: boolean; error?: string; name?: string; size?: number; nlink?: number; progress?: boolean; id?: string; gone?: boolean; created?: boolean; tmp?: string; cause?: string };
+export type FsHeader = { ok?: boolean; error?: string; name?: string; size?: number; nlink?: number; progress?: boolean; id?: string; gone?: boolean; created?: boolean; paused?: string; tmp?: string; cause?: string };
 export type FsReply = { h: FsHeader; p: Buffer };
 
 /** Per-request timeout (ms). Exported setter for tests. */
