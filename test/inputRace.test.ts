@@ -252,6 +252,9 @@ describe.skipIf(!SYMLINKS)("live race (poc/race.mjs, in mode)", () => {
     for (const f of okFiles) expect(leaked).not.toContain(f);
     expect(leaked, JSON.stringify(res)).toEqual([]);
     const allowed = ["INPUT_NOT_FOUND", "SYMLINK_OUTSIDE_ROOT", "PATH_CHANGED", "INPUT_NOT_FILE", "OUTPUT_DIR_CHANGED", "DIR_NOT_FOUND", "NOT_DIR"];
+    // Windows: EPERM/EACCES ("delete pending") on create in a folder being swapped -> WRITE_FAILED; nothing is
+    // created (same as folderMoves/fsHelper). no outside reads/writes is asserted above. CI 40002617815.
+    if (process.platform === "win32") allowed.push("WRITE_FAILED");
     for (const code of Object.keys(res.codes)) expect(allowed, JSON.stringify(res)).toContain(code);
   }, 300_000);
 });
