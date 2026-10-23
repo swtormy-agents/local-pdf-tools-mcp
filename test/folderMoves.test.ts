@@ -59,10 +59,16 @@ describe("F9: folders moved into / out of the root during operations", () => {
         const sw = spawn(process.execPath, ["-e", `const fs=require("fs");const R=${R},O=${O};${scripts[MODE]}`], { stdio: "ignore" });
         await new Promise((r) => setTimeout(r, 100));
         const res = { ok: 0, secret: 0, movedIn: 0, codes: {} as Record<string, number> };
-        let i = 0;
+        let i = 0, done = 0, maxMs = 0;
+        const t0 = Date.now();
+        const slow: string[] = [];
+        // Progress / slow-call log (slowness vs hang): every 1000 completed calls, and any single call over 5 s.
+        const tick = setInterval(() => console.log(`moves ${MODE} ${OP} heartbeat: started ${i} done ${done} at ${Date.now() - t0} ms, max call ${maxMs} ms`), 30_000);
         const worker = async () => {
           while (i < N) {
             i++;
+            const c0 = Date.now();
+            let code = "ok";
             try {
               if (OP === "read") {
                 const [f] = await readInputs(guard, ["a/rin/doc.pdf"], "pdf");
@@ -73,18 +79,24 @@ describe("F9: folders moved into / out of the root during operations", () => {
               res.ok++;
             } catch (e: any) {
               const k = e.code ?? "NOCODE";
+              code = k;
               res.codes[k] = (res.codes[k] ?? 0) + 1;
             }
+            const ms = Date.now() - c0;
+            maxMs = Math.max(maxMs, ms);
+            if (ms > 5000) { slow.push(`${ms}ms:${code}`); console.log(`moves ${MODE} ${OP} slow call #${done + 1}: ${ms} ms ${code}`); }
+            if (++done % 1000 === 0) console.log(`moves ${MODE} ${OP} progress ${done}/${N} at ${Date.now() - t0} ms ${JSON.stringify(res.codes)} ok ${res.ok}`);
           }
         };
         try {
           await Promise.all(Array.from({ length: C }, worker));
         } finally {
+          clearInterval(tick);
           const gone = new Promise((r) => sw.once("exit", r));
           sw.kill("SIGKILL");
           await gone;
         }
-        const line = JSON.stringify({ MODE, OP, N, ...res });
+        const line = JSON.stringify({ MODE, OP, N, ms: Date.now() - t0, maxMs, slow: slow.length, ...res });
         console.log("moves", line);
         for (const k of Object.keys(res.codes)) expect(ALLOWED, line).toContain(k);
         expect(res.secret, line).toBe(0);
