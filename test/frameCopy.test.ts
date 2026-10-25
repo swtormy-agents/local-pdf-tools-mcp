@@ -60,16 +60,16 @@ describe("output names: no linear re-probe per write", () => {
     await fs.mkdir(path.join(root, "o"));
     const guard = await PathGuard.create(root);
     const dir = await guard.resolveOutputDir("o");
-    testHooks.writeExtra = { testNextFree: 9999 };
+    testHooks.writeExtra = { testNextFree: 99999 };
     try {
       const high = await guard.writeNewFile(dir, "x", "pdf", Buffer.from("%PDF-1.7"));
-      expect(path.basename(high)).toBe("x-9999.pdf");
+      expect(path.basename(high)).toBe("x-99999.pdf");
     } finally {
       testHooks.writeExtra = undefined;
     }
-    // nextFree is now 10000; x.pdf is free. Before the rescan this threw EEXHAUST (Windows 20k F9 symptom).
+    // nextFree is now NAME_MAX (100000); x.pdf is free. Before the rescan this threw EEXHAUST.
     const low = await guard.writeNewFile(dir, "x", "pdf", Buffer.from("%PDF-1.7"));
     expect(path.basename(low)).toBe("x.pdf");
-    expect(await fs.readFile(path.join(root, "o", "x-9999.pdf"))).toBeTruthy();
+    expect(await fs.readFile(path.join(root, "o", "x-99999.pdf"))).toBeTruthy();
   }, 60_000);
 });

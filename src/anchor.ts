@@ -93,19 +93,21 @@ function read(m) {
 // in one folder each call cost thousands of syscalls + IPC frames (Windows folderMoves 'moves in write' at 20k calls
 // slowed down steadily to >5 s per call). O_EXCL still decides; the hint only skips names this helper already used.
 const nextFree = new Map();
+// Max suffix for one (folder, base.ext). 10000 was too low: Windows F9 20k 'moves in write' created exactly
+// 10000 o-*.pdf (oPdfCount:10000) then EEXHAUST. 20k writes of the same name into one dir is in-scope; the
+// hint keeps each create O(1). Still EEXHAUST when every slot is taken (after one rescan from 0 if the hint was stale).
+const NAME_MAX = 100000;
 function write(m, data) {
   const ids = enter(m, false);
   const key = ids[ids.length - 1] + "/" + m.base + "." + m.ext;
   // Hint starts at the next suffix this helper already used for this (folder-id, name). It must not be the only
   // scan: Windows can report the same directory FileIndex for two live folders (the F9 in/out pair), and a folder
-  // that moved out still leaves its high hint on that id. Starting at 10000 then threw EEXHAUST ("Too many existing
-  // files named o-N.pdf") while the folder now at a/rin had far fewer than 10000 o-*.pdf (Windows stress 20k, 1221
-  // such WRITE_FAILED). If the hinted range is empty, rescan once from 0; still EEXHAUST only when all 10000 names exist.
+  // that moved out still leaves its high hint on that id. If the hinted range is empty, rescan once from 0.
   let start = (m.testNextFree != null ? Number(m.testNextFree) : nextFree.get(key)) || 0;
   let retried = false;
   for (;;) {
     let probes = 0;
-    for (let i = start; i < 10000; i++) {
+    for (let i = start; i < NAME_MAX; i++) {
       const name = i === 0 ? m.base + "." + m.ext : m.base + "-" + i + "." + m.ext;
       let fd;
       // A name that already exists is skipped without a create attempt (and without announcing it).
