@@ -4,6 +4,7 @@
  * timeout or crash a fresh helper walks to the parent (dev/ino checked, no symlink followed) and removes that name only
  * if it still has that dev:ino. Also checks the swap-between-check-and-unlink cases (nothing outside the root removed).
  */
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -106,9 +107,30 @@ describe("F7: no output left after timeout or helper crash", () => {
     const c = fsCall({ op: "cleanup", root: guard.root, rootId: (guard as any).rootId, parts: ["o"], name: "x.pdf", id: `${st.dev}:${st.ino}`, testPauseMs: 600 }, undefined, (h) => h.paused === "check" && atPause());
     await paused; // the helper has checked the id and is pausing before it moves the name
     await fs.rename(path.join(root, "o"), path.join(outside, "moved"));
-    expect((await c).h.error).toBe("ECHANGED");
-    expect(await fs.readFile(path.join(outside, "moved", "x.pdf"), "utf8")).toBe("ours");
-    expect(await fs.readdir(path.join(outside, "moved"))).toEqual(["x.pdf"]); // N5: nothing renamed there
+    const moved = path.join(outside, "moved");
+    const x = path.join(moved, "x.pdf");
+    const before = await fs.stat(x, { bigint: true });
+    const idBefore = `${before.dev}:${before.ino}`;
+    // L3: the two under() checks before rename can be removed and the post-hoc readdir still passes (helper
+    // rename+link-back restores x.pdf). Watch the name so a rename inside the moved-out folder fails the test.
+    let nameRenamed = false;
+    const watcher = fsSync.watch(x, (event) => {
+      if (event === "rename" || !fsSync.existsSync(x)) nameRenamed = true;
+    });
+    const poll = setInterval(() => {
+      if (!fsSync.existsSync(x)) nameRenamed = true;
+    }, 2);
+    try {
+      expect((await c).h.error).toBe("ECHANGED");
+    } finally {
+      clearInterval(poll);
+      watcher.close();
+    }
+    expect(nameRenamed, "x.pdf was renamed inside the moved-out folder during cleanup").toBe(false);
+    expect(await fs.readFile(x, "utf8")).toBe("ours");
+    expect(await fs.readdir(moved)).toEqual(["x.pdf"]); // N5: nothing renamed there
+    const after = await fs.stat(x, { bigint: true });
+    expect(`${after.dev}:${after.ino}`).toBe(idBefore);
   });
 
   const cleanupOf = (guard: PathGuard, name: string, id: string, extra: object = {}, onPause?: (p: string) => void) =>

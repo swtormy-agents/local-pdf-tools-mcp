@@ -48,7 +48,28 @@ describe("output names: no linear re-probe per write", () => {
       testHooks.onWriteProgress = undefined;
     }
     expect(announced).toEqual(["x-300.pdf"]);
+    // nextFree starts at 299: one lstat of foreign x-299.pdf + one of x-300.pdf. Without the hint this is 301.
+    expect(testHooks.lastWrite?.probes, `lstat probes: ${testHooks.lastWrite?.probes}`).toBeLessThanOrEqual(2);
     expect(await fs.readFile(path.join(root, "o", "x-299.pdf"), "utf8")).toBe("FOREIGN");
     expect((await fs.readdir(path.join(root, "o"))).length).toBe(301);
+  }, 60_000);
+
+  it("a stale nextFree hint does not EEXHAUST when lower names are free", async () => {
+    const { testHooks } = await import("../src/pathGuard");
+    const root = await tmpRoot();
+    await fs.mkdir(path.join(root, "o"));
+    const guard = await PathGuard.create(root);
+    const dir = await guard.resolveOutputDir("o");
+    testHooks.writeExtra = { testNextFree: 99999 };
+    try {
+      const high = await guard.writeNewFile(dir, "x", "pdf", Buffer.from("%PDF-1.7"));
+      expect(path.basename(high)).toBe("x-99999.pdf");
+    } finally {
+      testHooks.writeExtra = undefined;
+    }
+    // nextFree is now NAME_MAX (100000); x.pdf is free. Before the rescan this threw EEXHAUST.
+    const low = await guard.writeNewFile(dir, "x", "pdf", Buffer.from("%PDF-1.7"));
+    expect(path.basename(low)).toBe("x.pdf");
+    expect(await fs.readFile(path.join(root, "o", "x-99999.pdf"))).toBeTruthy();
   }, 60_000);
 });

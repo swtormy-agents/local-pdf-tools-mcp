@@ -4,6 +4,16 @@ import path from "node:path";
 
 export const FIXTURES = path.resolve(__dirname, "fixtures");
 
+/**
+ * Windows race tests may see WRITE_FAILED when create hits delete-pending. Only EPERM/EACCES are that case;
+ * ENOSPC/EIO/other WRITE_FAILED must still fail the test (L1).
+ */
+export const WIN_WRITE_FAILED_ERRNO = /\((EPERM|EACCES)\)/;
+
+export function winWriteFailedOk(message: string): boolean {
+  return WIN_WRITE_FAILED_ERRNO.test(message);
+}
+
 export async function tmpRoot(): Promise<string> {
   return fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "lptm-")));
 }

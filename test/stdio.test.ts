@@ -70,6 +70,7 @@ describe("stdio transport (bundled dist)", () => {
     // pdf-lib's parser warnings for the truncated PDF really were printed, and on stderr.
     expect(stderr).toMatch(/Trying to parse invalid object|Invalid object ref/);
     expect(stderr).toContain("ready. Allowed root");
+    expect(stderr).toMatch(/local-pdf-tools-mcp 0\.1\.\d+ ready/);
   });
 });
 

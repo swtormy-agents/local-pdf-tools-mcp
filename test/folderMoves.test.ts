@@ -17,7 +17,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { readInputs, writePdf } from "../src/io";
 import { PathGuard } from "../src/pathGuard";
-import { tmpRoot } from "./helpers";
+import { tmpRoot, winWriteFailedOk } from "./helpers";
 
 const N = Number(process.env.MOVES_N ?? 1000);
 const C = 32;
@@ -58,7 +58,7 @@ describe("F9: folders moved into / out of the root during operations", () => {
         const R = JSON.stringify(root), O = JSON.stringify(outside);
         const sw = spawn(process.execPath, ["-e", `const fs=require("fs");const R=${R},O=${O};${scripts[MODE]}`], { stdio: "ignore" });
         await new Promise((r) => setTimeout(r, 100));
-        const res = { ok: 0, secret: 0, movedIn: 0, codes: {} as Record<string, number> };
+        const res = { ok: 0, secret: 0, movedIn: 0, codes: {} as Record<string, number>, msgs: [] as { code: string; msg: string }[] };
         let i = 0, done = 0, maxMs = 0;
         const t0 = Date.now();
         const slow: string[] = [];
@@ -81,6 +81,7 @@ describe("F9: folders moved into / out of the root during operations", () => {
               const k = e.code ?? "NOCODE";
               code = k;
               res.codes[k] = (res.codes[k] ?? 0) + 1;
+              res.msgs.push({ code: k, msg: String(e.message ?? "") });
             }
             const ms = Date.now() - c0;
             maxMs = Math.max(maxMs, ms);
@@ -96,9 +97,17 @@ describe("F9: folders moved into / out of the root during operations", () => {
           sw.kill("SIGKILL");
           await gone;
         }
-        const line = JSON.stringify({ MODE, OP, N, ms: Date.now() - t0, maxMs, slow: slow.length, ...res });
+        const oFiles = [...(await files(root)), ...((await files(outside)))]
+          .filter((f) => /^o(?:-\d+)?\.pdf$/.test(path.basename(f)));
+        const line = JSON.stringify({
+          MODE, OP, N, ms: Date.now() - t0, maxMs, slow: slow.length, oPdfCount: oFiles.length, ...res,
+        });
         console.log("moves", line);
-        for (const k of Object.keys(res.codes)) expect(ALLOWED, line).toContain(k);
+        for (const { code, msg } of res.msgs) {
+          expect(ALLOWED, line).toContain(code);
+          // EEXHAUST is WRITE_FAILED but not delete-pending; do not treat it as EPERM/EACCES.
+          if (code === "WRITE_FAILED") expect(winWriteFailedOk(msg), JSON.stringify({ code, msg, oPdfCount: oFiles.length })).toBe(true);
+        }
         expect(res.secret, line).toBe(0);
         // Nothing is ever created directly in outside/ (the never-moved folder).
         expect((await fs.readdir(outside)).filter((n) => n.startsWith("o")), line).toEqual([]);

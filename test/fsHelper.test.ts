@@ -16,7 +16,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { fsCall, setFsTimeout } from "../src/anchor";
 import { readInputs, writePdf } from "../src/io";
 import { PathGuard } from "../src/pathGuard";
-import { canSymlink, DIRLINK, tmpRoot } from "./helpers";
+import { canSymlink, DIRLINK, tmpRoot, winWriteFailedOk } from "./helpers";
 
 const N = Number(process.env.QA87_N ?? 1000);
 const CONC = Number(process.env.QA87_C ?? 32);
@@ -107,7 +107,7 @@ describe.skipIf(!SYMLINKS)("QA87 race repro (junctions on Windows)", () => {
         };
         const sw = spawn(process.execPath, ["-e", `const fs=require("fs");const R=${R},O=${O};${scripts[MODE]}`], { stdio: "ignore" });
         await new Promise((r) => setTimeout(r, 150));
-        const res = { ok: 0, outsideReads: 0, codes: {} as Record<string, number> };
+        const res = { ok: 0, outsideReads: 0, codes: {} as Record<string, number>, msgs: [] as { code: string; msg: string }[] };
         let i = 0;
         const worker = async () => {
           while (i < N) {
@@ -124,6 +124,7 @@ describe.skipIf(!SYMLINKS)("QA87 race repro (junctions on Windows)", () => {
             } catch (e: any) {
               const k = e.code ?? "NOCODE:" + e.message;
               res.codes[k] = (res.codes[k] ?? 0) + 1;
+              res.msgs.push({ code: k, msg: String(e.message ?? "") });
             }
           }
         };
@@ -143,7 +144,10 @@ describe.skipIf(!SYMLINKS)("QA87 race repro (junctions on Windows)", () => {
         // Windows: creating a file in a folder that is being renamed/deleted by the swapper can fail with EPERM/EACCES
         // ("delete pending"), which the server reports as WRITE_FAILED. Nothing is created; the invariants above hold.
         if (process.platform === "win32") allowed.push("WRITE_FAILED");
-        for (const k of Object.keys(res.codes)) expect(allowed, line).toContain(k);
+        for (const { code, msg } of res.msgs) {
+          expect(allowed, line).toContain(code);
+          if (code === "WRITE_FAILED") expect(winWriteFailedOk(msg), JSON.stringify({ code, msg })).toBe(true);
+        }
       }, 1_200_000);
 });
 

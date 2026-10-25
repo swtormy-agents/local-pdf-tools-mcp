@@ -1,6 +1,6 @@
 /**
  * QA repros (Megan, core 331a28a review: /workspace/qa/pdfcore suite.py + REPORT.md, MCP review /workspace/qa/mcp2),
- * run end-to-end through the MCP server against the REAL core (fixed since core aea0eb0; pin now 047da26).
+ * run end-to-end through the MCP server against the REAL core (fixed since core aea0eb0; pin now bf31e73).
  * Fixtures in test/fixtures/qa/ are Megan's synthetic files (see README there); large inputs are generated here.
  */
 import fs from "node:fs/promises";

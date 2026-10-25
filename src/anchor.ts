@@ -93,45 +93,59 @@ function read(m) {
 // in one folder each call cost thousands of syscalls + IPC frames (Windows folderMoves 'moves in write' at 20k calls
 // slowed down steadily to >5 s per call). O_EXCL still decides; the hint only skips names this helper already used.
 const nextFree = new Map();
+// Max suffix for one (folder, base.ext). 10000 was too low: Windows F9 20k 'moves in write' created exactly
+// 10000 o-*.pdf (oPdfCount:10000) then EEXHAUST. 20k writes of the same name into one dir is in-scope; the
+// hint keeps each create O(1). Still EEXHAUST when every slot is taken (after one rescan from 0 if the hint was stale).
+const NAME_MAX = 100000;
 function write(m, data) {
   const ids = enter(m, false);
   const key = ids[ids.length - 1] + "/" + m.base + "." + m.ext;
-  for (let i = nextFree.get(key) || 0; i < 10000; i++) {
-    const name = i === 0 ? m.base + "." + m.ext : m.base + "-" + i + "." + m.ext;
-    let fd;
-    // A name that already exists is skipped without a create attempt (and without announcing it).
-    try { fs.lstatSync(name); continue; } catch (e) { if (e.code !== "ENOENT") throw e; }
-    // N4: announce the name before creating it; if killed before the id frame, the server knows a file may exist.
-    send({ progress: true, name });
-    if (m.testPauseBeforeCreateMs) Atomics.wait(sab, 0, 0, m.testPauseBeforeCreateMs);
-    try { fd = fs.openSync(name, C.O_WRONLY | C.O_CREAT | C.O_EXCL | NOFOLLOW, 0o644); } catch (e) { if (e.code === "EEXIST" || e.code === "ELOOP") continue; throw e; }
-    const st = fs.fstatSync(fd, B);
-    if (m.testPauseAfterCreateMs) Atomics.wait(sab, 0, 0, m.testPauseAfterCreateMs);
-    let open = true;
-    try {
-      if (!same(name, st) || !under(ids)) throw E("ECHANGED");
-      // F7: tell the server which file now exists (relative name + dev:ino) BEFORE any byte is written, so it can have
-      // a respawned helper remove it if this helper is killed or times out.
-      send({ progress: true, name, id: id(st), created: true });
-      let o = 0;
-      const half = m.testSlowMs ? data.length >> 1 : data.length;
-      while (o < half) o += fs.writeSync(fd, data, o, half - o);
-      if (m.testSlowMs) { fs.fsyncSync(fd); Atomics.wait(sab, 0, 0, m.testSlowMs); }
-      while (o < data.length) o += fs.writeSync(fd, data, o, data.length - o);
-      fs.fsyncSync(fd);
-      fs.closeSync(fd); open = false;
-      if (!same(name, st) || !under(ids)) throw E("ECHANGED");
-      if (nextFree.size > 10000) nextFree.clear();
-      nextFree.set(key, i + 1);
-      return [{ ok: true, name }];
-    } catch (e) {
-      if (open) try { fs.closeSync(fd); } catch {}
-      // Our own new file, removed by its relative name in the verified cwd, only if the name is still our inode.
-      if (same(name, st)) try { fs.unlinkSync(name); } catch {}
-      throw e;
+  // Hint starts at the next suffix this helper already used for this (folder-id, name). It must not be the only
+  // scan: Windows can report the same directory FileIndex for two live folders (the F9 in/out pair), and a folder
+  // that moved out still leaves its high hint on that id. If the hinted range is empty, rescan once from 0.
+  let start = (m.testNextFree != null ? Number(m.testNextFree) : nextFree.get(key)) || 0;
+  let retried = false;
+  for (;;) {
+    let probes = 0;
+    for (let i = start; i < NAME_MAX; i++) {
+      const name = i === 0 ? m.base + "." + m.ext : m.base + "-" + i + "." + m.ext;
+      let fd;
+      // A name that already exists is skipped without a create attempt (and without announcing it).
+      probes++;
+      try { fs.lstatSync(name); continue; } catch (e) { if (e.code !== "ENOENT") throw e; }
+      // N4: announce the name before creating it; if killed before the id frame, the server knows a file may exist.
+      send({ progress: true, name });
+      if (m.testPauseBeforeCreateMs) Atomics.wait(sab, 0, 0, m.testPauseBeforeCreateMs);
+      try { fd = fs.openSync(name, C.O_WRONLY | C.O_CREAT | C.O_EXCL | NOFOLLOW, 0o644); } catch (e) { if (e.code === "EEXIST" || e.code === "ELOOP") continue; throw e; }
+      const st = fs.fstatSync(fd, B);
+      if (m.testPauseAfterCreateMs) Atomics.wait(sab, 0, 0, m.testPauseAfterCreateMs);
+      let open = true;
+      try {
+        if (!same(name, st) || !under(ids)) throw E("ECHANGED");
+        // F7: tell the server which file now exists (relative name + dev:ino) BEFORE any byte is written, so it can have
+        // a respawned helper remove it if this helper is killed or times out.
+        send({ progress: true, name, id: id(st), created: true });
+        let o = 0;
+        const half = m.testSlowMs ? data.length >> 1 : data.length;
+        while (o < half) o += fs.writeSync(fd, data, o, half - o);
+        if (m.testSlowMs) { fs.fsyncSync(fd); Atomics.wait(sab, 0, 0, m.testSlowMs); }
+        while (o < data.length) o += fs.writeSync(fd, data, o, data.length - o);
+        fs.fsyncSync(fd);
+        fs.closeSync(fd); open = false;
+        if (!same(name, st) || !under(ids)) throw E("ECHANGED");
+        if (nextFree.size > 10000) nextFree.clear();
+        nextFree.set(key, i + 1);
+        return [{ ok: true, name, probes }];
+      } catch (e) {
+        if (open) try { fs.closeSync(fd); } catch {}
+        // Our own new file, removed by its relative name in the verified cwd, only if the name is still our inode.
+        if (same(name, st)) try { fs.unlinkSync(name); } catch {}
+        throw e;
+      }
     }
+    if (!retried && start > 0) { nextFree.delete(key); start = 0; retried = true; continue; }
+    throw E("EEXHAUST");
   }
-  throw E("EEXHAUST");
 }
 // F7 cleanup after a killed/timed-out write (QA N1/N2/N5): walk to the parent with the same dev/ino checks (no symlink
 // followed); every step below is a single name relative to that verified cwd. Nothing is ever renamed onto a name that
@@ -195,7 +209,7 @@ for (;;) {
 }
 `;
 
-export type FsHeader = { ok?: boolean; error?: string; name?: string; size?: number; nlink?: number; progress?: boolean; id?: string; gone?: boolean; created?: boolean; paused?: string; tmp?: string; cause?: string };
+export type FsHeader = { ok?: boolean; error?: string; name?: string; size?: number; nlink?: number; progress?: boolean; id?: string; gone?: boolean; created?: boolean; paused?: string; tmp?: string; cause?: string; probes?: number };
 export type FsReply = { h: FsHeader; p: Buffer };
 
 /** Per-request timeout (ms). Exported setter for tests. */

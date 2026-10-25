@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { everyNRanges, organizeNeedsPageCount, splitPartBase, toOrganizeOps } from "./adapter.js";
 import type { Config } from "./config.js";
@@ -19,7 +22,12 @@ import {
 } from "./schemas.js";
 
 export const SERVER_NAME = "local-pdf-tools-mcp";
-export const SERVER_VERSION = "0.0.0";
+/** Injected by scripts/build.mjs (`define`); tests read package.json next to src/. */
+declare const __LPTM_VERSION__: string | undefined;
+export const SERVER_VERSION: string =
+  typeof __LPTM_VERSION__ !== "undefined"
+    ? __LPTM_VERSION__
+    : JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8")).version;
 
 /** Tools that write: never overwrite or delete, local only. */
 const writeAnn = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false } as const;

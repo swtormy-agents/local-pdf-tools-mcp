@@ -51,6 +51,8 @@ export const testHooks: {
   writeExtra?: Record<string, unknown>;
   cleanupExtra?: Record<string, unknown>;
   onWriteProgress?: (h: FsHeader) => void;
+  /** Last successful write header (includes `probes`: lstat attempts for the free name). */
+  lastWrite?: FsHeader;
   /** Input side: called after the helper request finished. */
   afterInputOpen?: (real: string) => Promise<void> | void;
   /** Input side: called at named steps ("afterRealpath", "beforeHelper"). */
@@ -347,7 +349,10 @@ export class PathGuard {
       await testHooks.afterOpen?.(dir);
     }
     const err = r.h.error;
-    if (!err) return path.join(dir, r.h.name!);
+    if (!err) {
+      testHooks.lastWrite = r.h;
+      return path.join(dir, r.h.name!);
+    }
     if (err === "EEXHAUST") throw new UserError(`Too many existing files named ${base}-N.${ext} in "${shown}".`, "WRITE_FAILED");
     if (WRITE_CODES.has(err)) throw new UserError(`Could not write the output file in "${shown}" (${err}). Nothing was left behind.`, "WRITE_FAILED");
     throw new UserError(
