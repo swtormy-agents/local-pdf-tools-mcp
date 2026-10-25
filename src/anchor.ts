@@ -96,10 +96,12 @@ const nextFree = new Map();
 function write(m, data) {
   const ids = enter(m, false);
   const key = ids[ids.length - 1] + "/" + m.base + "." + m.ext;
+  let probes = 0;
   for (let i = nextFree.get(key) || 0; i < 10000; i++) {
     const name = i === 0 ? m.base + "." + m.ext : m.base + "-" + i + "." + m.ext;
     let fd;
     // A name that already exists is skipped without a create attempt (and without announcing it).
+    probes++;
     try { fs.lstatSync(name); continue; } catch (e) { if (e.code !== "ENOENT") throw e; }
     // N4: announce the name before creating it; if killed before the id frame, the server knows a file may exist.
     send({ progress: true, name });
@@ -123,7 +125,7 @@ function write(m, data) {
       if (!same(name, st) || !under(ids)) throw E("ECHANGED");
       if (nextFree.size > 10000) nextFree.clear();
       nextFree.set(key, i + 1);
-      return [{ ok: true, name }];
+      return [{ ok: true, name, probes }];
     } catch (e) {
       if (open) try { fs.closeSync(fd); } catch {}
       // Our own new file, removed by its relative name in the verified cwd, only if the name is still our inode.
@@ -195,7 +197,7 @@ for (;;) {
 }
 `;
 
-export type FsHeader = { ok?: boolean; error?: string; name?: string; size?: number; nlink?: number; progress?: boolean; id?: string; gone?: boolean; created?: boolean; paused?: string; tmp?: string; cause?: string };
+export type FsHeader = { ok?: boolean; error?: string; name?: string; size?: number; nlink?: number; progress?: boolean; id?: string; gone?: boolean; created?: boolean; paused?: string; tmp?: string; cause?: string; probes?: number };
 export type FsReply = { h: FsHeader; p: Buffer };
 
 /** Per-request timeout (ms). Exported setter for tests. */

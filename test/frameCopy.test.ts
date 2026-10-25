@@ -48,6 +48,8 @@ describe("output names: no linear re-probe per write", () => {
       testHooks.onWriteProgress = undefined;
     }
     expect(announced).toEqual(["x-300.pdf"]);
+    // nextFree starts at 299: one lstat of foreign x-299.pdf + one of x-300.pdf. Without the hint this is 301.
+    expect(testHooks.lastWrite?.probes, `lstat probes: ${testHooks.lastWrite?.probes}`).toBeLessThanOrEqual(2);
     expect(await fs.readFile(path.join(root, "o", "x-299.pdf"), "utf8")).toBe("FOREIGN");
     expect((await fs.readdir(path.join(root, "o"))).length).toBe(301);
   }, 60_000);

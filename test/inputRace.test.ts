@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { readInputs } from "../src/io";
 import { PathGuard, testHooks } from "../src/pathGuard";
 import { createServer } from "../src/server";
-import { canSymlink, DIRLINK, tmpRoot } from "./helpers";
+import { canSymlink, DIRLINK, tmpRoot, winWriteFailedOk } from "./helpers";
 
 // QA F8: directory-link races always run (junctions on Windows need no privilege); file-symlink cases run when a
 // runtime probe can create a symlink (skipped only on EPERM).
@@ -219,7 +219,7 @@ describe.skipIf(!SYMLINKS)("live race (poc/race.mjs, in mode)", () => {
     await fs.mkdir(path.join(root, "out"));
     const cwd = process.cwd();
     const sws = [startSwapper(root, outside, "rin"), startSwapper(root, outside, "out")];
-    const res = { ok: 0, outsideReads: 0, codes: {} as Record<string, number> };
+    const res = { ok: 0, outsideReads: 0, codes: {} as Record<string, number>, msgs: [] as { code: string; msg: string }[] };
     const okFiles: string[] = [];
     try {
       const client = await connect(root);
@@ -232,8 +232,12 @@ describe.skipIf(!SYMLINKS)("live race (poc/race.mjs, in mode)", () => {
               j % 2 === 0
                 ? await client.callTool({ name: "pdf_info", arguments: { input: "rin/doc.pdf" } })
                 : await client.callTool({ name: "pdf_merge", arguments: { inputs: ["rin/doc.pdf", "rin/doc.pdf"], outputDir: "out", outputName: `p${i}` } });
-            if (r.isError) res.codes[codeOf(r)] = (res.codes[codeOf(r)] ?? 0) + 1;
-            else {
+            if (r.isError) {
+              const code = codeOf(r);
+              const msg = String(r.content?.[0]?.text ?? "");
+              res.codes[code] = (res.codes[code] ?? 0) + 1;
+              res.msgs.push({ code, msg });
+            } else {
               res.ok++;
               if (j % 2 === 0 && r.structuredContent.pageCount !== 3) res.outsideReads++;
               if (j % 2 === 1) okFiles.push(`p${i}.pdf`);
@@ -255,6 +259,9 @@ describe.skipIf(!SYMLINKS)("live race (poc/race.mjs, in mode)", () => {
     // Windows: EPERM/EACCES ("delete pending") on create in a folder being swapped -> WRITE_FAILED; nothing is
     // created (same as folderMoves/fsHelper). no outside reads/writes is asserted above. CI 40002617815.
     if (process.platform === "win32") allowed.push("WRITE_FAILED");
-    for (const code of Object.keys(res.codes)) expect(allowed, JSON.stringify(res)).toContain(code);
+    for (const { code, msg } of res.msgs) {
+      expect(allowed, JSON.stringify(res)).toContain(code);
+      if (code === "WRITE_FAILED") expect(winWriteFailedOk(msg), JSON.stringify({ code, msg })).toBe(true);
+    }
   }, 300_000);
 });
