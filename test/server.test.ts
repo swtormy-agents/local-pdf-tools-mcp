@@ -6,8 +6,13 @@ import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config";
 import { PdfToolError } from "@local-pdf-tools/core";
 import type { PdfCore } from "../src/core/types";
-import { createServer } from "../src/server";
+import { createServer, SERVER_NAME, SERVER_VERSION } from "../src/server";
 import { FIXTURES, tmpRoot } from "./helpers";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const PKG_VERSION = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8")).version;
 
 async function connect(core?: PdfCore) {
   const root = await tmpRoot();
@@ -23,6 +28,11 @@ async function connect(core?: PdfCore) {
 const text = (r: any) => r.content.map((c: any) => c.text).join("\n");
 
 describe("server", () => {
+  it("reports the package.json version to clients", async () => {
+    expect(SERVER_VERSION).toBe(PKG_VERSION);
+    const { client } = await connect();
+    expect(client.getServerVersion()).toEqual({ name: SERVER_NAME, version: PKG_VERSION });
+  });
   it("lists the five tools with annotations", async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();

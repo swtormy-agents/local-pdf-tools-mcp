@@ -28,6 +28,7 @@ const result = await build({
   legalComments: "eof",
   metafile: true,
   logLevel: "warning",
+  define: { __LPTM_VERSION__: JSON.stringify(pkg.version) },
 });
 fs.mkdirSync(path.join(root, "build"), { recursive: true });
 fs.writeFileSync(path.join(root, "build", "metafile.json"), JSON.stringify(result.metafile, null, 1));
