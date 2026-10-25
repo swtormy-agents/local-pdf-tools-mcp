@@ -97,11 +97,16 @@ describe("F9: folders moved into / out of the root during operations", () => {
           sw.kill("SIGKILL");
           await gone;
         }
-        const line = JSON.stringify({ MODE, OP, N, ms: Date.now() - t0, maxMs, slow: slow.length, ...res });
+        const oFiles = [...(await files(root)), ...((await files(outside)))]
+          .filter((f) => /^o(?:-\d+)?\.pdf$/.test(path.basename(f)));
+        const line = JSON.stringify({
+          MODE, OP, N, ms: Date.now() - t0, maxMs, slow: slow.length, oPdfCount: oFiles.length, ...res,
+        });
         console.log("moves", line);
         for (const { code, msg } of res.msgs) {
           expect(ALLOWED, line).toContain(code);
-          if (code === "WRITE_FAILED") expect(winWriteFailedOk(msg), JSON.stringify({ code, msg })).toBe(true);
+          // EEXHAUST is WRITE_FAILED but not delete-pending; do not treat it as EPERM/EACCES.
+          if (code === "WRITE_FAILED") expect(winWriteFailedOk(msg), JSON.stringify({ code, msg, oPdfCount: oFiles.length })).toBe(true);
         }
         expect(res.secret, line).toBe(0);
         // Nothing is ever created directly in outside/ (the never-moved folder).

@@ -53,4 +53,23 @@ describe("output names: no linear re-probe per write", () => {
     expect(await fs.readFile(path.join(root, "o", "x-299.pdf"), "utf8")).toBe("FOREIGN");
     expect((await fs.readdir(path.join(root, "o"))).length).toBe(301);
   }, 60_000);
+
+  it("a stale nextFree hint does not EEXHAUST when lower names are free", async () => {
+    const { testHooks } = await import("../src/pathGuard");
+    const root = await tmpRoot();
+    await fs.mkdir(path.join(root, "o"));
+    const guard = await PathGuard.create(root);
+    const dir = await guard.resolveOutputDir("o");
+    testHooks.writeExtra = { testNextFree: 9999 };
+    try {
+      const high = await guard.writeNewFile(dir, "x", "pdf", Buffer.from("%PDF-1.7"));
+      expect(path.basename(high)).toBe("x-9999.pdf");
+    } finally {
+      testHooks.writeExtra = undefined;
+    }
+    // nextFree is now 10000; x.pdf is free. Before the rescan this threw EEXHAUST (Windows 20k F9 symptom).
+    const low = await guard.writeNewFile(dir, "x", "pdf", Buffer.from("%PDF-1.7"));
+    expect(path.basename(low)).toBe("x.pdf");
+    expect(await fs.readFile(path.join(root, "o", "x-9999.pdf"))).toBeTruthy();
+  }, 60_000);
 });
