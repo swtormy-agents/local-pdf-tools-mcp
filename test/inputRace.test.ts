@@ -192,18 +192,28 @@ describe.skipIf(!SYMLINKS)("live race (poc/race.mjs, in mode)", () => {
     const swapper = startSwapper(root, outside, "out");
     try {
       const client = await connect(root);
-      const res = { ok: 0, codes: {} as Record<string, number> };
+      const res = { ok: 0, codes: {} as Record<string, number>, msgs: [] as { code: string; msg: string }[] };
       for (let i = 0; i < Math.min(ITER, 200); i++) {
         const r: any = await client.callTool({ name: "pdf_merge", arguments: { inputs: ["rin/doc.pdf", "rin/doc.pdf"], outputDir: "out", outputName: `m${i}` } });
-        if (r.isError) res.codes[codeOf(r)] = (res.codes[codeOf(r)] ?? 0) + 1;
-        else res.ok++;
+        if (r.isError) {
+          const code = codeOf(r);
+          const msg = String(r.content?.[0]?.text ?? "");
+          res.codes[code] = (res.codes[code] ?? 0) + 1;
+          res.msgs.push({ code, msg });
+        } else res.ok++;
       }
       swapper.kill();
       const leaked = (await fs.readdir(outside)).filter((f) => f !== "doc.pdf");
       // The helper creates relative to a verified cwd: not even an empty file may appear outside (QA F1).
       expect(leaked, JSON.stringify(res)).toEqual([]);
       for (const f of leaked) expect((await fs.stat(path.join(outside, f))).size, f).toBe(0);
-      for (const code of Object.keys(res.codes)) expect(["OUTPUT_DIR_CHANGED", "SYMLINK_OUTSIDE_ROOT", "PATH_CHANGED", "DIR_NOT_FOUND", "NOT_DIR"], JSON.stringify(res)).toContain(code);
+      const allowed = ["OUTPUT_DIR_CHANGED", "SYMLINK_OUTSIDE_ROOT", "PATH_CHANGED", "DIR_NOT_FOUND", "NOT_DIR"];
+      // Windows: EPERM/EACCES ("delete pending") on create while `out` is swapped — same as the parallel case.
+      if (process.platform === "win32") allowed.push("WRITE_FAILED");
+      for (const { code, msg } of res.msgs) {
+        expect(allowed, JSON.stringify(res)).toContain(code);
+        if (code === "WRITE_FAILED") expect(winWriteFailedOk(msg), JSON.stringify({ code, msg })).toBe(true);
+      }
     } finally {
       swapper.kill();
     }
