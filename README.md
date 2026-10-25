@@ -2,12 +2,17 @@
 
 Local stdio MCP server for PDF work on your own machine: `pdf_info`, `pdf_merge`, `pdf_split`, `pdf_organize` (reorder/rotate/remove pages), `images_to_pdf`. No network, no telemetry, nothing is uploaded.
 
-Status: pre-release. All five tools run on the shared core `@local-pdf-tools/core` (the same code as the website), with end-to-end tests on the core's fixtures. Not published yet.
+Docs: [https://noclaudkit.com/pdf/](https://noclaudkit.com/pdf/)
+
+Status: 0.1.1. All five tools run on the shared core `@local-pdf-tools/core` (the same code as the website), with end-to-end tests on the core's fixtures.
 
 ## Quick start
 Requires Node.js 20 or newer. Pick one folder the server may use, for example `/Users/you/pdf-work` (it must not be your home folder or a filesystem root).
 
-Add this to your MCP client config:
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](cursor://anysphere.cursor-deeplink/mcp/install?name=local-pdf-tools&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsImxvY2FsLXBkZi10b29scy1tY3AiLCItLXJvb3QiLCIvVXNlcnMveW91L3BkZi13b3JrIl19)
+
+### Cursor
+Add this to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` in a project:
 
 ```json
 {
@@ -20,9 +25,22 @@ Add this to your MCP client config:
 }
 ```
 
-- **Claude Desktop:** `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`, Windows: `%APPDATA%\Claude\`). Restart Claude Desktop after editing.
-- **Cursor:** `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` in a project.
-- **Other clients:** run `npx -y local-pdf-tools-mcp --root <absolute-folder>` over stdio, or set `LOCAL_PDF_TOOLS_ROOT` instead of `--root`.
+### Claude Desktop
+Add this to `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`, Windows: `%APPDATA%\Claude\`). Restart Claude Desktop after editing.
+
+```json
+{
+  "mcpServers": {
+    "local-pdf-tools": {
+      "command": "npx",
+      "args": ["-y", "local-pdf-tools-mcp", "--root", "/Users/you/pdf-work"]
+    }
+  }
+}
+```
+
+### Other clients
+Run `npx -y local-pdf-tools-mcp --root <absolute-folder>` over stdio, or set `LOCAL_PDF_TOOLS_ROOT` instead of `--root`.
 
 Paths: use an absolute path; `~` is not expanded and is refused. On Windows, escape backslashes in JSON (`"C:\\Users\\you\\pdf-work"`) or use forward slashes.
 
@@ -50,7 +68,7 @@ Paths are relative to the allowed root. Page numbers are 1-based. Outputs are al
 - Error messages name paths relative to the root only, never the absolute root or a location outside it.
 
 ### Privacy: what is removed from outputs
-- Every output is a new document, rebuilt by the core: the page dict and `/Resources` keep only allowlisted keys, and for dictionaries recognised by type (fonts, ExtGState, Form/Image XObjects, patterns, shadings, functions, colour-space parameters) the keys below `/Resources` are allowlisted too; other page-description data is kept (see the core README). Data that rendering needs is kept with its bytes copied as is and could carry private data, for example font programs, `/ToUnicode` CMaps, ICC profiles, function and shading streams, page content streams and non-JPEG image data (this list is not complete; see the core README). `/Type`, `/S`, `/Subtype` and `/Filter` are resolved through indirect references before they are checked; a reference chain longer than 32 hops or cyclic fails with `PDF_INVALID`, and references to missing objects are treated as null (the reference may remain, with no data). Removed from the output: the document Info dictionary and catalog XMP metadata, JavaScript/Launch and other actions (also under nonstandard keys or in `/Resources`), OpenAction, attachments (incl. page `/AF`), form fields, XObject `/Metadata` or `/PieceInfo`; only http/https/mailto link annotations survive. JPEG EXIF (incl. GPS), XMP, IPTC and comments are stripped, both from images given to `images_to_pdf` and from JPEG images inside input PDFs. Known limitation: metadata inside JPEG 2000 (`JPXDecode`) images and inside inline images (`BI ... EI` in content streams) is NOT stripped, and text in content streams is copied as is (see the core README, [Security / Known limits](https://github.com/swtormy-agents/pdf-tools/blob/047da26535530d1235f9d6df9bba946960a4cfee/README.md#security)). Do not rely on this tool to anonymize such files.
+- Every output is a new document, rebuilt by the core: the page dict and `/Resources` keep only allowlisted keys, and for dictionaries recognised by type (fonts, ExtGState, Form/Image XObjects, patterns, shadings, functions, colour-space parameters) the keys below `/Resources` are allowlisted too; other page-description data is kept (see the core README). Data that rendering needs is kept with its bytes copied as is and could carry private data, for example font programs, `/ToUnicode` CMaps, ICC profiles, function and shading streams, page content streams and non-JPEG image data (this list is not complete; see the core README). `/Type`, `/S`, `/Subtype` and `/Filter` are resolved through indirect references before they are checked; a reference chain longer than 32 hops or cyclic fails with `PDF_INVALID`, and references to missing objects are treated as null (the reference may remain, with no data). Removed from the output: the document Info dictionary and catalog XMP metadata, JavaScript/Launch and other actions (also under nonstandard keys or in `/Resources`), OpenAction, attachments (incl. page `/AF`), form fields, XObject `/Metadata` or `/PieceInfo`; only http/https/mailto link annotations survive. JPEG EXIF (incl. GPS), XMP, IPTC and comments are stripped, both from images given to `images_to_pdf` and from JPEG images inside input PDFs. Known limitation: metadata inside JPEG 2000 (`JPXDecode`) images and inside inline images (`BI ... EI` in content streams) is NOT stripped, and text in content streams is copied as is (see the core README, [Security / Known limits](https://github.com/swtormy-agents/pdf-tools/blob/bf31e73b7fc578fcadd4a477d1ffc535c18343ea/README.md#security)). Do not rely on this tool to anonymize such files.
 - Encrypted PDFs are refused (`PDF_ENCRYPTED`) and never decrypted.
 - stdout carries only MCP JSON-RPC; library warnings go to stderr. The core does not write to stdout (pdf-lib's only `console.log`, in `FlateStream`, is unreachable, and the core has a test for that); the server still routes `console.log/info/debug/...` to stderr before it starts (`src/stdio.ts`) as defense in depth, and `test/stdio.test.ts` checks stdout of the bundled server.
 
@@ -95,4 +113,4 @@ To move to a newer core: `npm install -D "github:swtormy-agents/pdf-tools#<full-
 `npm run build` (`scripts/build.mjs`) bundles `src/` with esbuild into `dist/` (ESM, node20), inlining `@local-pdf-tools/core`, `pdf-lib` and pdf-lib's dependencies. `@modelcontextprotocol/sdk` and `zod` stay regular npm dependencies, so the published package has no git dependency. `THIRD_PARTY_NOTICES` (shipped in the package) is generated by `npm run notices` from the installed packages and the verbatim upstream texts in `scripts/licenses/` (pdfkit LICENSE, Christopher Brown MIT, Apache-2.0), cross-checked against the core's THIRD-PARTY.md; `test/release.test.ts` fails if it is out of date or misses a package inlined into the bundle, and checks `npm pack --dry-run`.
 
 ## License
-MIT. See [LICENSE](https://github.com/swtormy-agents/local-pdf-tools-mcp/blob/main/LICENSE). Third-party notices: [THIRD_PARTY_NOTICES](https://github.com/swtormy-agents/local-pdf-tools-mcp/blob/main/THIRD_PARTY_NOTICES).
+MIT. See [LICENSE](./LICENSE). Third-party notices: [THIRD_PARTY_NOTICES](./THIRD_PARTY_NOTICES).

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.swtormy-agents/local-pdf-tools-mcp",
+  "title": "Local PDF Tools",
+  "description": "Local stdio MCP server for PDF merge, split, organize and images to PDF. No network, no telemetry.",
+  "version": "0.1.1",
+  "websiteUrl": "https://noclaudkit.com/pdf/",
+  "repository": {
+    "url": "https://github.com/swtormy-agents/local-pdf-tools-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "local-pdf-tools-mcp",
+      "version": "0.1.1",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
