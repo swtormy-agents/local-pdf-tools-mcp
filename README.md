@@ -9,7 +9,7 @@ Status: 0.1.1. All five tools run on the shared core `@local-pdf-tools/core` (th
 ## Quick start
 Requires Node.js 20 or newer. Pick one folder the server may use, for example `/Users/you/pdf-work` (it must not be your home folder or a filesystem root).
 
-[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](cursor://anysphere.cursor-deeplink/mcp/install?name=local-pdf-tools&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsImxvY2FsLXBkZi10b29scy1tY3AiLCItLXJvb3QiLCIvVXNlcnMveW91L3BkZi13b3JrIl19)
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=local-pdf-tools&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsImxvY2FsLXBkZi10b29scy1tY3AiLCItLXJvb3QiLCIvVXNlcnMveW91L3BkZi13b3JrIl19)
 
 ### Cursor
 Add this to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` in a project:
