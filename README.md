@@ -11,6 +11,8 @@ Requires Node.js 20 or newer. Pick one folder the server may use, for example `/
 
 [![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=local-pdf-tools&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsImxvY2FsLXBkZi10b29scy1tY3AiLCItLXJvb3QiLCIvVXNlcnMveW91L3BkZi13b3JrIl19)
 
+After installing, change `--root` to your own folder (the button installs the example `--root /Users/you/pdf-work`).
+
 ### Cursor
 Add this to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` in a project:
 
